@@ -1,0 +1,77 @@
+#!/bin/bash
+
+# ACS Must-Gather - Central Diagnostic Endpoints
+# Collects debug data from Central's internal HTTP API via oc exec.
+
+# shellcheck source=collection-scripts/common.sh
+source /usr/bin/common.sh
+
+log_msg "--- gather_diagnostics: starting ---"
+
+DIAG_DIR="${MUST_GATHER_DIR}/acs-diagnostics"
+mkdir -p "${DIAG_DIR}"
+
+# ---------- Find running Central pod ----------
+CENTRAL_POD=""
+CENTRAL_NS=""
+
+while IFS= read -r ns; do
+    [[ -z "${ns}" ]] && continue
+    pod=$(oc get pods -n "${ns}" -l app=central \
+        --field-selector=status.phase=Running \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+    if [[ -n "${pod}" ]]; then
+        CENTRAL_POD="${pod}"
+        CENTRAL_NS="${ns}"
+        break
+    fi
+done <<< "${ACS_NAMESPACES}"
+
+if [[ -z "${CENTRAL_POD}" ]]; then
+    log_msg "WARNING: No running Central pod found. Skipping diagnostic collection."
+    echo "No running Central pod found." > "${DIAG_DIR}/collection-error.txt"
+    exit 0
+fi
+
+log_msg "Found Central pod: ${CENTRAL_POD} in namespace ${CENTRAL_NS}"
+
+collect_endpoint() {
+    local name="$1"
+    local path="$2"
+    local output_file="$3"
+
+    log_msg "  Collecting ${name}: ${path}"
+    timeout "${DIAG_TIMEOUT}" \
+        oc exec -n "${CENTRAL_NS}" "${CENTRAL_POD}" -c central -- \
+        curl -sSk "https://localhost:8443${path}" \
+        > "${DIAG_DIR}/${output_file}" 2>/dev/null || {
+            log_msg "WARNING: Failed to collect ${name}"
+            echo "Failed to collect ${name} from ${path}" > "${DIAG_DIR}/${output_file}.error"
+            return 0
+        }
+}
+
+# ---------- Lightweight API endpoints (parallel) ----------
+DIAG_PIDS=()
+
+collect_endpoint "metadata"       "/v1/metadata"                    "central-metadata.json" &
+DIAG_PIDS+=($!)
+
+collect_endpoint "cluster-list"   "/v1/clusters"                    "central-clusters.json" &
+DIAG_PIDS+=($!)
+
+collect_endpoint "upgrade-status" "/v1/centralhealth/upgradestatus" "central-upgrade-status.json" &
+DIAG_PIDS+=($!)
+
+collect_endpoint "db-status"      "/v1/database/status"             "central-db-status.json" &
+DIAG_PIDS+=($!)
+
+for pid in "${DIAG_PIDS[@]}"; do
+    wait "${pid}" || true
+done
+
+# ---------- Heavyweight debug endpoints (sequential) ----------
+collect_endpoint "goroutine-dump" "/debug/goroutine?debug=2"        "central-goroutine-dump.txt"
+collect_endpoint "heap-profile"   "/debug/heap"                     "central-heap-profile.pb.gz"
+
+log_msg "--- gather_diagnostics: complete ---"

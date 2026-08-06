@@ -1,0 +1,71 @@
+#!/bin/bash
+
+# ACS Must-Gather - Central Services
+# Collects Central, Scanner V4, Central DB, and related resources.
+
+# shellcheck source=collection-scripts/common.sh
+source /usr/bin/common.sh
+
+log_msg "--- gather_central: starting ---"
+
+while IFS= read -r ns; do
+    [[ -z "${ns}" ]] && continue
+
+    if ! resource_exists "deployment/central" "${ns}"; then
+        log_msg "No Central deployment in ${ns}, skipping central collection"
+        continue
+    fi
+
+    log_msg "Collecting Central services in namespace ${ns}..."
+
+    # ---------- Full namespace inspection ----------
+    inspect_namespace "${ns}"
+
+    # ---------- Central ----------
+    inspect_resource "deployment/central" "${ns}"
+
+    # ---------- Central DB ----------
+    if resource_exists "statefulset/central-db" "${ns}"; then
+        inspect_resource "statefulset/central-db" "${ns}"
+    elif resource_exists "deployment/central-db" "${ns}"; then
+        inspect_resource "deployment/central-db" "${ns}"
+    fi
+
+    # ---------- Scanner V4 ----------
+    for component in scanner-v4-indexer scanner-v4-matcher; do
+        if resource_exists "deployment/${component}" "${ns}"; then
+            inspect_resource "deployment/${component}" "${ns}"
+        fi
+    done
+
+    if resource_exists "statefulset/scanner-v4-db" "${ns}"; then
+        inspect_resource "statefulset/scanner-v4-db" "${ns}"
+    elif resource_exists "deployment/scanner-v4-db" "${ns}"; then
+        inspect_resource "deployment/scanner-v4-db" "${ns}"
+    fi
+
+    # ---------- Legacy Scanner (conditional) ----------
+    for legacy in scanner scanner-db; do
+        if resource_exists "deployment/${legacy}" "${ns}"; then
+            log_msg "Found legacy scanner component: ${legacy}"
+            inspect_resource "deployment/${legacy}" "${ns}"
+        fi
+    done
+
+    # ---------- NetworkPolicies ----------
+    inspect_resource "networkpolicies.networking.k8s.io" "${ns}"
+
+    # ---------- PVCs ----------
+    inspect_resource "persistentvolumeclaims" "${ns}"
+
+    # ---------- Routes (OpenShift only) ----------
+    if oc api-resources --api-group=route.openshift.io &>/dev/null 2>&1; then
+        inspect_resource "routes.route.openshift.io" "${ns}"
+    fi
+
+    # ---------- HPAs ----------
+    inspect_resource "horizontalpodautoscalers.autoscaling" "${ns}"
+
+done <<< "${ACS_NAMESPACES}"
+
+log_msg "--- gather_central: complete ---"

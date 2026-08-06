@@ -1,0 +1,92 @@
+#!/bin/bash
+
+# ACS Must-Gather - Main Entrypoint
+# Orchestrates parallel collection of all ACS diagnostic data.
+# No set -e: collection must continue even when individual commands fail.
+
+export MUST_GATHER_DIR="${MUST_GATHER_DIR:-/must-gather}"
+mkdir -p "${MUST_GATHER_DIR}"
+
+# shellcheck source=collection-scripts/common.sh
+source /usr/bin/common.sh
+
+# ---------- Version metadata ----------
+{
+    echo "acs-must-gather"
+    echo "collected-at: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    oc version 2>/dev/null || echo "oc version: unavailable"
+} > "${MUST_GATHER_DIR}/version"
+
+echo "start: $(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "${MUST_GATHER_DIR}/timestamp"
+
+log_msg "=== ACS Must-Gather collection starting ==="
+
+# ---------- Namespace discovery ----------
+OPERATOR_NS="$(discover_operator_namespace)"
+if [[ -n "${OPERATOR_NS}" ]]; then
+    log_msg "Operator namespace discovered: ${OPERATOR_NS}"
+else
+    log_msg "WARNING: RHACS operator namespace not found. Operator collection will be skipped."
+fi
+export OPERATOR_NS
+
+ACS_NAMESPACES="$(discover_acs_namespaces)"
+if [[ -n "${ACS_NAMESPACES}" ]]; then
+    log_msg "ACS namespaces discovered: $(echo "${ACS_NAMESPACES}" | tr '\n' ' ')"
+else
+    log_msg "WARNING: No ACS workload namespaces found via CRs. Checking fallback."
+    if oc get namespace stackrox &>/dev/null; then
+        ACS_NAMESPACES="stackrox"
+        log_msg "Using fallback namespace: stackrox"
+    else
+        log_msg "ERROR: No ACS namespaces found."
+    fi
+fi
+export ACS_NAMESPACES
+
+# ---------- Parallel sub-gatherer launch ----------
+PIDS=()
+
+/usr/bin/gather_cluster_scoped &
+PIDS+=($!)
+log_msg "Launched gather_cluster_scoped (PID: ${PIDS[-1]})"
+
+if [[ -n "${OPERATOR_NS}" ]]; then
+    /usr/bin/gather_operator &
+    PIDS+=($!)
+    log_msg "Launched gather_operator (PID: ${PIDS[-1]})"
+fi
+
+if [[ -n "${ACS_NAMESPACES}" ]]; then
+    /usr/bin/gather_central &
+    PIDS+=($!)
+    log_msg "Launched gather_central (PID: ${PIDS[-1]})"
+
+    /usr/bin/gather_secured_cluster &
+    PIDS+=($!)
+    log_msg "Launched gather_secured_cluster (PID: ${PIDS[-1]})"
+fi
+
+if [[ "${GATHER_DIAGNOSTICS:-true}" == "true" ]] && [[ -n "${ACS_NAMESPACES}" ]]; then
+    /usr/bin/gather_diagnostics &
+    PIDS+=($!)
+    log_msg "Launched gather_diagnostics (PID: ${PIDS[-1]})"
+fi
+
+# ---------- Wait for all sub-gatherers ----------
+if [[ ${#PIDS[@]} -gt 0 ]]; then
+    log_msg "Waiting on ${#PIDS[@]} sub-gatherers..."
+    for pid in "${PIDS[@]}"; do
+        if ! wait "${pid}"; then
+            log_msg "WARNING: Sub-gatherer PID ${pid} exited with non-zero status"
+        fi
+    done
+fi
+
+# ---------- Finalize ----------
+echo "end: $(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "${MUST_GATHER_DIR}/timestamp"
+
+log_msg "=== ACS Must-Gather collection complete ==="
+
+sync
+exit 0

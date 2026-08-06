@@ -1,0 +1,27 @@
+#!/bin/bash
+
+# ACS Must-Gather - RHACS Operator Resources
+# Collects operator namespace, deployment, and OLM artifacts.
+
+# shellcheck source=collection-scripts/common.sh
+source /usr/bin/common.sh
+
+log_msg "--- gather_operator: starting ---"
+
+# ---------- Full namespace inspection ----------
+inspect_namespace "${OPERATOR_NS}"
+
+# ---------- Operator deployment ----------
+if resource_exists "deployment/rhacs-operator-controller-manager" "${OPERATOR_NS}"; then
+    inspect_resource "deployment/rhacs-operator-controller-manager" "${OPERATOR_NS}"
+else
+    log_msg "WARNING: rhacs-operator-controller-manager deployment not found in ${OPERATOR_NS}"
+fi
+
+# ---------- OLM resources ----------
+log_msg "Collecting OLM resources in ${OPERATOR_NS}..."
+inspect_resource "clusterserviceversions.operators.coreos.com" "${OPERATOR_NS}"
+inspect_resource "subscriptions.operators.coreos.com" "${OPERATOR_NS}"
+inspect_resource "installplans.operators.coreos.com" "${OPERATOR_NS}"
+
+log_msg "--- gather_operator: complete ---"

@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# ACS Must-Gather - Secured Cluster Services
+# Collects Sensor, Collector, and Admission Controller resources.
+
+# shellcheck source=collection-scripts/common.sh
+source /usr/bin/common.sh
+
+log_msg "--- gather_secured_cluster: starting ---"
+
+while IFS= read -r ns; do
+    [[ -z "${ns}" ]] && continue
+
+    if ! resource_exists "deployment/sensor" "${ns}"; then
+        log_msg "No Sensor deployment in ${ns}, skipping secured cluster collection"
+        continue
+    fi
+
+    log_msg "Collecting Secured Cluster services in namespace ${ns}..."
+
+    # Full namespace inspection (safe to call even if gather_central already did —
+    # oc adm inspect overwrites the same output files)
+    inspect_namespace "${ns}"
+
+    # ---------- Sensor ----------
+    inspect_resource "deployment/sensor" "${ns}"
+
+    # ---------- Collector ----------
+    if resource_exists "daemonset/collector" "${ns}"; then
+        inspect_resource "daemonset/collector" "${ns}"
+    else
+        log_msg "WARNING: Collector DaemonSet not found in ${ns}"
+    fi
+
+    # ---------- Admission Controller ----------
+    if resource_exists "deployment/admission-control" "${ns}"; then
+        inspect_resource "deployment/admission-control" "${ns}"
+    fi
+
+    # ---------- NetworkPolicies ----------
+    inspect_resource "networkpolicies.networking.k8s.io" "${ns}"
+
+done <<< "${ACS_NAMESPACES}"
+
+log_msg "--- gather_secured_cluster: complete ---"
