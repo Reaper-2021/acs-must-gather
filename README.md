@@ -5,7 +5,7 @@ A must-gather image for collecting diagnostic information from Red Hat Advanced 
 ## Usage
 
 ```sh
-oc adm must-gather --image=quay.io/rhacs-eng/acs-must-gather:latest
+oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest
 ```
 
 This collects data related to ACS components only. For general cluster diagnostics, run `oc adm must-gather` without a custom image.
@@ -14,10 +14,10 @@ This collects data related to ACS components only. For general cluster diagnosti
 
 ```sh
 # Collect logs from the last 8 hours
-oc adm must-gather --image=quay.io/rhacs-eng/acs-must-gather:latest -- /usr/bin/gather MUST_GATHER_SINCE=8h
+oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest -- /usr/bin/gather MUST_GATHER_SINCE=8h
 
 # Collect logs since a specific time
-oc adm must-gather --image=quay.io/rhacs-eng/acs-must-gather:latest -- /usr/bin/gather MUST_GATHER_SINCE_TIME=2024-01-15T10:00:00Z
+oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest -- /usr/bin/gather MUST_GATHER_SINCE_TIME=2024-01-15T10:00:00Z
 ```
 
 ## What is collected

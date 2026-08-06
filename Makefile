@@ -1,4 +1,4 @@
-IMAGE_REPO ?= quay.io/rhacs-eng
+IMAGE_REPO ?= quay.io/rhn_support_shaising
 IMAGE_NAME ?= acs-must-gather
 IMAGE_TAG  ?= latest
 IMAGE      := $(IMAGE_REPO)/$(IMAGE_NAME):$(IMAGE_TAG)
