@@ -6,7 +6,7 @@ IMAGE      := $(IMAGE_REPO)/$(IMAGE_NAME):$(IMAGE_TAG)
 .PHONY: build push lint clean
 
 build:
-	podman build -t $(IMAGE) .
+	podman build --platform linux/amd64 -t $(IMAGE) .
 
 push: build
 	podman push $(IMAGE)
