@@ -109,13 +109,41 @@ fi
 
 log_msg "Port-forward established (PID: ${PF_PID})"
 
+# ---------- Build query parameters ----------
+QUERY_PARAMS=""
+
+# Add logs option if specified
+if [[ "${DEBUG_DUMP_LOGS:-false}" == "true" ]]; then
+    QUERY_PARAMS="${QUERY_PARAMS}&logs=true"
+    log_msg "Central logs will be included"
+fi
+
+# Add telemetry level if specified (0=none, 1=Central only, 2=Central+Sensors)
+if [[ -n "${DEBUG_DUMP_TELEMETRY:-}" ]]; then
+    QUERY_PARAMS="${QUERY_PARAMS}&telemetry=${DEBUG_DUMP_TELEMETRY}"
+    case "${DEBUG_DUMP_TELEMETRY}" in
+        0) log_msg "Telemetry: disabled" ;;
+        1) log_msg "Telemetry: Central only" ;;
+        2) log_msg "Telemetry: Central + all Sensors" ;;
+        *) log_msg "WARNING: Invalid telemetry value (${DEBUG_DUMP_TELEMETRY}), use 0, 1, or 2" ;;
+    esac
+fi
+
+# Remove leading '&' if any params were added
+if [[ -n "${QUERY_PARAMS}" ]]; then
+    QUERY_PARAMS="?${QUERY_PARAMS:1}"
+fi
+
 # ---------- Collect debug dump ----------
 DUMP_TIMEOUT="${DEBUG_DUMP_TIMEOUT:-180}"  # 3 minutes default (includes 30s CPU profiling)
+DUMP_URL="https://localhost:${LOCAL_PORT}/debug/dump${QUERY_PARAMS}"
+
 log_msg "Collecting debug dump with CPU profiling (timeout: ${DUMP_TIMEOUT}s, includes 30s CPU profile)..."
+log_msg "Endpoint: /debug/dump${QUERY_PARAMS}"
 
 timeout "${DUMP_TIMEOUT}" \
     curl -sSk -u "admin:${ADMIN_PASSWORD}" \
-    "https://localhost:${LOCAL_PORT}/debug/dump" \
+    "${DUMP_URL}" \
     -o "${DIAG_DIR}/stackrox-debug-dump.zip" 2>/dev/null
 
 CURL_EXIT=$?
@@ -133,19 +161,31 @@ Debug dump collection timed out after ${DUMP_TIMEOUT}s
 
 Debug dump includes 30 seconds of CPU profiling, so collection takes at least 30s.
 
-To increase timeout, set environment variable:
-  DEBUG_DUMP_TIMEOUT=300  # 5 minutes
+Recommended solutions:
 
-To collect with options:
-1. Get admin password: oc get secret -n ${CENTRAL_NS} central-htpasswd -o jsonpath='{.data.password}' | base64 -d
-2. Forward port: oc port-forward -n ${CENTRAL_NS} ${CENTRAL_POD} 8443:8443
-3. Download with options:
-   # With Central logs:
-   curl -k -u admin:<password> "https://localhost:8443/debug/dump?logs=true" -o dump.zip
+1. Increase timeout:
+   DEBUG_DUMP_TIMEOUT=300  # 5 minutes
 
-   # With telemetry:
-   curl -k -u admin:<password> "https://localhost:8443/debug/dump?telemetry=1" -o dump.zip  # Central only
-   curl -k -u admin:<password> "https://localhost:8443/debug/dump?telemetry=2" -o dump.zip  # Central + Sensors
+2. Include Central logs (adds collection time):
+   DEBUG_DUMP_LOGS=true
+
+3. Add telemetry data:
+   DEBUG_DUMP_TELEMETRY=1  # Central only
+   DEBUG_DUMP_TELEMETRY=2  # Central + all Sensors
+
+Example:
+  oc adm must-gather \\
+    --image=quay.io/rhn_support_shaising/acs-must-gather:latest \\
+    -- /usr/bin/gather \\
+    GATHER_DEBUG_DUMP=true \\
+    DEBUG_DUMP_TELEMETRY=1
+
+Manual collection (alternative):
+  1. Get admin password: oc get secret -n ${CENTRAL_NS} central-htpasswd -o jsonpath='{.data.password}' | base64 -d
+  2. Forward port: oc port-forward -n ${CENTRAL_NS} ${CENTRAL_POD} 8443:8443
+  3. Download: curl -k -u admin:<password> "https://localhost:8443/debug/dump?logs=true&telemetry=1" -o dump.zip
+
+See FEATURE_DEBUG_DUMP.md for all options.
 EOF
 elif [[ ${CURL_EXIT} -ne 0 ]]; then
     log_msg "WARNING: Debug dump collection failed (exit code: ${CURL_EXIT})"
@@ -157,6 +197,12 @@ elif [[ ! -f "${DIAG_DIR}/stackrox-debug-dump.zip" ]]; then
 else
     DUMP_SIZE=$(du -h "${DIAG_DIR}/stackrox-debug-dump.zip" 2>/dev/null | awk '{print $1}')
     log_msg "Successfully collected debug dump (${DUMP_SIZE})"
+
+    # Warn if dump is unusually large
+    DUMP_SIZE_BYTES=$(stat -f%z "${DIAG_DIR}/stackrox-debug-dump.zip" 2>/dev/null || stat -c%s "${DIAG_DIR}/stackrox-debug-dump.zip" 2>/dev/null)
+    if [[ ${DUMP_SIZE_BYTES} -gt 104857600 ]]; then  # >100MB
+        log_msg "WARNING: Debug dump is large (${DUMP_SIZE}). This may indicate large heap or extensive logs included."
+    fi
 fi
 
 log_msg "--- gather_debug_dump: complete ---"

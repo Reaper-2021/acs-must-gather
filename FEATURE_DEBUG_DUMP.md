@@ -59,6 +59,120 @@ Debug dump is specifically designed for **performance debugging**:
 - Focused on Central performance, not multi-cluster state
 - Includes active profiling (CPU, mutex) vs passive data collection
 
+## Comparison with Official Methods
+
+RHACS provides three methods to collect debug dumps. Each has different use cases:
+
+### Method 1: roxctl CLI (Official Tool)
+
+```bash
+roxctl central debug dump \
+  --endpoint <central-url>:443 \
+  --output debug-dump.zip
+```
+
+**When to use:**
+- ✅ Central has external route/ingress configured
+- ✅ Have Central credentials externally available
+- ✅ Quick performance debugging session
+- ✅ Only need debug dump (not K8s resources)
+- ✅ Prefer official tool with Red Hat support
+
+**Limitations:**
+- ❌ Requires external Central access (route/ingress)
+- ❌ Does not collect Kubernetes resources
+- ❌ Does not collect operator or OLM resources
+- ❌ Requires separate tool installation
+
+### Method 2: Direct API Call
+
+```bash
+# Port-forward to Central
+oc port-forward -n stackrox deploy/central 8443:8443
+
+# Download debug dump
+curl -k -u admin:<password> \
+  https://localhost:8443/debug/dump \
+  -o debug-dump.zip
+```
+
+**When to use:**
+- ✅ Quick manual collection
+- ✅ Testing/development
+- ✅ Need to customize query parameters easily
+
+**Limitations:**
+- ❌ Manual process, multiple steps
+- ❌ No automation friendly
+- ❌ Does not collect K8s resources
+
+### Method 3: acs-must-gather with GATHER_DEBUG_DUMP=true (This Feature)
+
+```bash
+oc adm must-gather \
+  --image=quay.io/rhn_support_shaising/acs-must-gather:latest \
+  -- /usr/bin/gather \
+  GATHER_DEBUG_DUMP=true
+```
+
+**When to use:**
+- ✅ Central is running but external routes are down
+- ✅ Need both debug dump AND Kubernetes state
+- ✅ Don't have Central credentials externally available
+- ✅ Want operator and OLM troubleshooting data
+- ✅ One command for complete collection
+- ✅ Automated troubleshooting workflows
+- ✅ Performance issue + environment state correlation
+
+**Advantages:**
+- ✅ Works without external Central access (uses oc port-forward)
+- ✅ Automatically retrieves admin password from Secrets
+- ✅ Collects debug dump + K8s resources + operator data
+- ✅ Single command for comprehensive collection
+- ✅ Includes OpenShift-specific resources (Routes, SCCs)
+- ✅ Works even if Central is degraded (K8s resources still collected)
+
+**Limitations:**
+- ❌ Slower than roxctl (must port-forward each time)
+- ❌ Requires cluster admin access (to read Secrets)
+- ❌ 3-minute default timeout (configurable)
+
+### Comparison Table
+
+| Feature | roxctl CLI | Direct API | acs-must-gather |
+|---------|-----------|-----------|-----------------|
+| **CPU Profiling (30s)** | ✅ | ✅ | ✅ |
+| **Heap Profile** | ✅ | ✅ | ✅ |
+| **Goroutine Dump** | ✅ | ✅ | ✅ |
+| **Mutex Profile** | ✅ | ✅ | ✅ |
+| **PostgreSQL Diagnostics** | ✅ | ✅ | ✅ |
+| **Prometheus Metrics** | ✅ | ✅ | ✅ |
+| **Query Parameters** | ❌ | ✅ | ✅ (new) |
+| **Kubernetes Resources** | ❌ | ❌ | ✅ |
+| **Operator Resources** | ❌ | ❌ | ✅ |
+| **Cluster RBAC** | ❌ | ❌ | ✅ |
+| **OpenShift Specific** | ❌ | ❌ | ✅ |
+| **External Access Required** | Yes | No | No |
+| **Automation Friendly** | ✅ | ❌ | ✅ |
+| **Collection Time** | 1-2 min | 1-2 min | 2-3 min |
+| **Official Support** | ✅ | ✅ | Community |
+
+### Recommendation
+
+**For performance debugging:**
+- Start with `acs-must-gather` with `GATHER_DEBUG_DUMP=true` for comprehensive data
+- Use `roxctl` if you only need profiles and have external access
+- Use direct API call for quick manual debugging
+
+**For production issues:**
+- Use `acs-must-gather` to capture both performance data and environment state
+- Correlate CPU/heap profiles with pod resource limits, node capacity
+- Include telemetry to understand workload patterns
+
+**For development/testing:**
+- Use direct API call for rapid iteration
+- Use `roxctl` for automated performance tests
+
 ## How It Works
 
 ### Authentication
@@ -86,14 +200,44 @@ oc adm must-gather \
 
 ### Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GATHER_DEBUG_DUMP` | Enable debug dump collection | `false` (disabled by default) |
-| `DEBUG_DUMP_TIMEOUT` | Collection timeout in seconds | `180` (3 minutes) |
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `GATHER_DEBUG_DUMP` | Enable debug dump collection | `false` (disabled) | `true` |
+| `DEBUG_DUMP_TIMEOUT` | Collection timeout in seconds | `180` (3 minutes) | `300` |
+| `DEBUG_DUMP_LOGS` | Include Central logs in dump | `false` | `true` |
+| `DEBUG_DUMP_TELEMETRY` | Include telemetry data (0=none, 1=Central, 2=Central+Sensors) | (none) | `1` or `2` |
 
-### Example with Custom Timeout
+### Example with Query Parameters
 
 ```bash
+# Basic debug dump (CPU + heap + goroutine + mutex profiles)
+oc adm must-gather \
+  --image=quay.io/rhn_support_shaising/acs-must-gather:latest \
+  -- /usr/bin/gather \
+  GATHER_DEBUG_DUMP=true
+
+# With Central logs included
+oc adm must-gather \
+  --image=quay.io/rhn_support_shaising/acs-must-gather:latest \
+  -- /usr/bin/gather \
+  GATHER_DEBUG_DUMP=true \
+  DEBUG_DUMP_LOGS=true
+
+# With Central telemetry
+oc adm must-gather \
+  --image=quay.io/rhn_support_shaising/acs-must-gather:latest \
+  -- /usr/bin/gather \
+  GATHER_DEBUG_DUMP=true \
+  DEBUG_DUMP_TELEMETRY=1
+
+# With Central + Sensor telemetry (comprehensive)
+oc adm must-gather \
+  --image=quay.io/rhn_support_shaising/acs-must-gather:latest \
+  -- /usr/bin/gather \
+  GATHER_DEBUG_DUMP=true \
+  DEBUG_DUMP_TELEMETRY=2
+
+# Custom timeout
 oc adm must-gather \
   --image=quay.io/rhn_support_shaising/acs-must-gather:latest \
   -- /usr/bin/gather \
@@ -122,12 +266,50 @@ ZIP contents:
 /must-gather/acs-diagnostics/debug-dump-error.txt
 ```
 
-## Collection Time
+## Collection Time and Size
 
-**Expected duration**: 1-2 minutes
-- Minimum: 30 seconds (CPU profiling time)
-- Typical: 60-90 seconds
-- Default timeout: 3 minutes
+### Expected Collection Time
+
+| Configuration | Time | Notes |
+|--------------|------|-------|
+| **Basic** (profiles only) | 30-60 seconds | Minimum 30s for CPU profiling |
+| **With logs** (`DEBUG_DUMP_LOGS=true`) | 1-2 minutes | Depends on log volume |
+| **With Central telemetry** (`DEBUG_DUMP_TELEMETRY=1`) | 1-2 minutes | Small overhead |
+| **With all telemetry** (`DEBUG_DUMP_TELEMETRY=2`) | 2-3 minutes | Includes all Sensors |
+
+**Note**: Collection time in acs-must-gather is ~20-30% slower than roxctl due to port-forward overhead.
+
+### Expected Bundle Size
+
+| Content Type | Typical Size | Large Instance |
+|-------------|--------------|----------------|
+| **Basic (profiles + DB + config)** | 5-10 MB | 10-30 MB |
+| **With logs** | 10-30 MB | 30-100 MB |
+| **With telemetry** | 15-40 MB | 40-100 MB |
+| **Compressed Format** | ZIP | ZIP |
+
+**Warning**: Dumps larger than 100 MB may indicate:
+- Large heap size (memory leak investigation)
+- Extensive logs included (reduce retention or use log filtering)
+- Many goroutines (potential goroutine leak)
+- High mutex contention (many blocked operations)
+
+### Timeout Recommendations
+
+Based on configuration:
+
+```bash
+# Basic profiles (default)
+DEBUG_DUMP_TIMEOUT=180  # 3 minutes
+
+# With logs or telemetry
+DEBUG_DUMP_TIMEOUT=300  # 5 minutes
+
+# Comprehensive (logs + telemetry)
+DEBUG_DUMP_TIMEOUT=600  # 10 minutes
+```
+
+**Tip**: Start with basic dump first to get CPU/heap profiles quickly, then collect with logs/telemetry if needed.
 
 ## Analyzing pprof Profiles
 
