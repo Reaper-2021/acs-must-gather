@@ -53,6 +53,19 @@ oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest -
 - `/debug/goroutine` — goroutine stack dump
 - `/debug/heap` — heap memory profile
 
+### Optional: Debug Dump (Experimental)
+To collect Central's debug dump with CPU profiling for performance debugging:
+
+```sh
+oc adm must-gather \
+  --image=quay.io/rhn_support_shaising/acs-must-gather:latest \
+  -- /usr/bin/gather \
+  GATHER_DEBUG_DUMP=true
+```
+
+**Note**: Requires Central running and admin password in Secret. Includes 30-second CPU profiling. Collection takes 1-2 minutes.  
+See `FEATURE_DEBUG_DUMP.md` for details.
+
 ## Environment Variables
 
 | Variable | Description | Default |

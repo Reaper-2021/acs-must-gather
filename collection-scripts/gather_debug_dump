@@ -1,0 +1,162 @@
+#!/bin/bash
+
+# ACS Must-Gather - Debug Dump Collection
+# Collects performance debugging bundle with CPU profiling from Central.
+# Requires authentication to Central API.
+
+# shellcheck source=collection-scripts/common.sh
+source /usr/bin/common.sh
+
+log_msg "--- gather_debug_dump: starting ---"
+
+DIAG_DIR="${MUST_GATHER_DIR}/acs-diagnostics"
+mkdir -p "${DIAG_DIR}"
+
+# ---------- Find running Central pod ----------
+CENTRAL_POD=""
+CENTRAL_NS=""
+
+while IFS= read -r ns; do
+    [[ -z "${ns}" ]] && continue
+    pod=$(oc get pods -n "${ns}" -l app=central \
+        --field-selector=status.phase=Running \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+    if [[ -n "${pod}" ]]; then
+        CENTRAL_POD="${pod}"
+        CENTRAL_NS="${ns}"
+        break
+    fi
+done <<< "${ACS_NAMESPACES}"
+
+if [[ -z "${CENTRAL_POD}" ]]; then
+    log_msg "WARNING: No running Central pod found. Skipping debug dump collection."
+    echo "No running Central pod found." > "${DIAG_DIR}/debug-dump-error.txt"
+    exit 0
+fi
+
+log_msg "Found Central pod: ${CENTRAL_POD} in namespace ${CENTRAL_NS}"
+
+# ---------- Get authentication credentials ----------
+log_msg "Retrieving Central admin credentials..."
+
+# Try to get admin password from htpasswd secret
+ADMIN_PASSWORD=""
+ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" central-htpasswd \
+    -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+
+if [[ -z "${ADMIN_PASSWORD}" ]]; then
+    log_msg "WARNING: Could not retrieve admin password from central-htpasswd secret."
+    log_msg "Trying alternative secret names..."
+
+    # Try stackrox-admin-password secret (older versions)
+    ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" stackrox-admin-password \
+        -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+fi
+
+if [[ -z "${ADMIN_PASSWORD}" ]]; then
+    log_msg "ERROR: Could not retrieve Central admin password. Debug dump requires authentication."
+    cat > "${DIAG_DIR}/debug-dump-error.txt" <<EOF
+Could not retrieve Central admin password for authentication.
+
+The debug dump endpoint (/debug/dump) requires authentication.
+
+Tried secrets:
+- central-htpasswd (namespace: ${CENTRAL_NS})
+- stackrox-admin-password (namespace: ${CENTRAL_NS})
+
+To collect debug dump manually:
+1. Get admin password: oc get secret -n ${CENTRAL_NS} central-htpasswd -o jsonpath='{.data.password}' | base64 -d
+2. Forward port: oc port-forward -n ${CENTRAL_NS} ${CENTRAL_POD} 8443:8443
+3. Download dump: curl -k -u admin:<password> https://localhost:8443/debug/dump -o debug-dump.zip
+
+Alternatively, use roxctl:
+  roxctl -e <central-url> central debug dump
+EOF
+    exit 0
+fi
+
+log_msg "Successfully retrieved admin credentials"
+
+# ---------- Set up port-forward ----------
+log_msg "Setting up port-forward to Central pod..."
+
+# Find an available local port
+LOCAL_PORT=8443
+while lsof -Pi :${LOCAL_PORT} -sTCP:LISTEN -t >/dev/null 2>&1; do
+    LOCAL_PORT=$((LOCAL_PORT + 1))
+    if [[ ${LOCAL_PORT} -gt 9000 ]]; then
+        log_msg "ERROR: Could not find available port for port-forward"
+        echo "Could not find available port" > "${DIAG_DIR}/debug-dump-error.txt"
+        exit 0
+    fi
+done
+
+log_msg "Using local port ${LOCAL_PORT} for port-forward"
+
+# Start port-forward in background
+oc port-forward -n "${CENTRAL_NS}" "${CENTRAL_POD}" "${LOCAL_PORT}:8443" >/dev/null 2>&1 &
+PF_PID=$!
+
+# Wait for port-forward to establish
+sleep 3
+
+# Verify port-forward is working
+if ! kill -0 "${PF_PID}" 2>/dev/null; then
+    log_msg "ERROR: Port-forward process died"
+    echo "Port-forward failed to establish" > "${DIAG_DIR}/debug-dump-error.txt"
+    exit 0
+fi
+
+log_msg "Port-forward established (PID: ${PF_PID})"
+
+# ---------- Collect debug dump ----------
+DUMP_TIMEOUT="${DEBUG_DUMP_TIMEOUT:-180}"  # 3 minutes default (includes 30s CPU profiling)
+log_msg "Collecting debug dump with CPU profiling (timeout: ${DUMP_TIMEOUT}s, includes 30s CPU profile)..."
+
+timeout "${DUMP_TIMEOUT}" \
+    curl -sSk -u "admin:${ADMIN_PASSWORD}" \
+    "https://localhost:${LOCAL_PORT}/debug/dump" \
+    -o "${DIAG_DIR}/stackrox-debug-dump.zip" 2>/dev/null
+
+CURL_EXIT=$?
+
+# Clean up port-forward
+kill "${PF_PID}" 2>/dev/null || true
+wait "${PF_PID}" 2>/dev/null || true
+
+# ---------- Check collection result ----------
+if [[ ${CURL_EXIT} -eq 124 ]]; then
+    log_msg "WARNING: Debug dump collection timed out after ${DUMP_TIMEOUT}s"
+    rm -f "${DIAG_DIR}/stackrox-debug-dump.zip"
+    cat > "${DIAG_DIR}/debug-dump-error.txt" <<EOF
+Debug dump collection timed out after ${DUMP_TIMEOUT}s
+
+Debug dump includes 30 seconds of CPU profiling, so collection takes at least 30s.
+
+To increase timeout, set environment variable:
+  DEBUG_DUMP_TIMEOUT=300  # 5 minutes
+
+To collect with options:
+1. Get admin password: oc get secret -n ${CENTRAL_NS} central-htpasswd -o jsonpath='{.data.password}' | base64 -d
+2. Forward port: oc port-forward -n ${CENTRAL_NS} ${CENTRAL_POD} 8443:8443
+3. Download with options:
+   # With Central logs:
+   curl -k -u admin:<password> "https://localhost:8443/debug/dump?logs=true" -o dump.zip
+
+   # With telemetry:
+   curl -k -u admin:<password> "https://localhost:8443/debug/dump?telemetry=1" -o dump.zip  # Central only
+   curl -k -u admin:<password> "https://localhost:8443/debug/dump?telemetry=2" -o dump.zip  # Central + Sensors
+EOF
+elif [[ ${CURL_EXIT} -ne 0 ]]; then
+    log_msg "WARNING: Debug dump collection failed (exit code: ${CURL_EXIT})"
+    rm -f "${DIAG_DIR}/stackrox-debug-dump.zip"
+    echo "Debug dump collection failed (curl exit code: ${CURL_EXIT})" > "${DIAG_DIR}/debug-dump-error.txt"
+elif [[ ! -f "${DIAG_DIR}/stackrox-debug-dump.zip" ]]; then
+    log_msg "WARNING: Debug dump file not created"
+    echo "Debug dump file not created (unknown error)" > "${DIAG_DIR}/debug-dump-error.txt"
+else
+    DUMP_SIZE=$(du -h "${DIAG_DIR}/stackrox-debug-dump.zip" 2>/dev/null | awk '{print $1}')
+    log_msg "Successfully collected debug dump (${DUMP_SIZE})"
+fi
+
+log_msg "--- gather_debug_dump: complete ---"
