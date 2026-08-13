@@ -1,0 +1,218 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run shellcheck
+        run: make lint
+
+  validate-scripts:
+    name: Validate Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check script syntax
+        run: |
+          for script in collection-scripts/*; do
+            if [[ -f "$script" && -x "$script" ]]; then
+              echo "Checking syntax: $script"
+              bash -n "$script"
+            fi
+          done
+
+      - name: Check for trailing whitespace
+        run: |
+          if git diff --check HEAD~1 ':(exclude)*.md'; then
+            echo "No trailing whitespace found"
+          else
+            echo "ERROR: Trailing whitespace detected"
+            exit 1
+          fi
+
+      - name: Verify executable permissions
+        run: |
+          for script in collection-scripts/gather*; do
+            if [[ ! -x "$script" ]]; then
+              echo "ERROR: $script is not executable"
+              exit 1
+            fi
+          done
+
+  build-image:
+    name: Build Container Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        run: make build
+
+      - name: Save image
+        run: |
+          docker save acs-must-gather:latest -o /tmp/acs-must-gather.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: acs-must-gather-image
+          path: /tmp/acs-must-gather.tar
+          retention-days: 1
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+
+      - name: Run unit tests
+        run: |
+          if [[ -d tests/unit ]]; then
+            make test-unit
+          else
+            echo "No unit tests yet - skipping"
+          fi
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: build-image
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: acs-must-gather-image
+          path: /tmp
+
+      - name: Load image
+        run: docker load -i /tmp/acs-must-gather.tar
+
+      - name: Set up Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: must-gather-test
+          wait: 60s
+
+      - name: Deploy test RHACS installation
+        run: |
+          if [[ -f tests/integration/deploy-test-rhacs.sh ]]; then
+            bash tests/integration/deploy-test-rhacs.sh
+          else
+            echo "No test deployment script - skipping integration tests"
+          fi
+
+      - name: Run must-gather
+        if: success()
+        run: |
+          if [[ -f tests/integration/run-must-gather.sh ]]; then
+            bash tests/integration/run-must-gather.sh
+          else
+            echo "No integration test script - skipping"
+          fi
+
+      - name: Validate collected data
+        if: success()
+        run: |
+          if [[ -f tests/integration/validate-output.sh ]]; then
+            bash tests/integration/validate-output.sh
+          else
+            echo "No validation script - skipping"
+          fi
+
+  pr-title-check:
+    name: PR Title Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Check PR title format
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Allow conventional commit format or simple descriptive titles
+          if echo "$PR_TITLE" | grep -qE '^(feat|fix|docs|style|refactor|test|chore)(\(.+\))?: .+$'; then
+            echo "PR title follows conventional commit format"
+          elif echo "$PR_TITLE" | grep -qE '^[A-Z].{10,}$'; then
+            echo "PR title is descriptive"
+          else
+            echo "ERROR: PR title should follow conventional commit format"
+            echo "Examples:"
+            echo "  feat: Add diagnostic bundle collection"
+            echo "  fix: Correct namespace discovery"
+            echo "  docs: Update README with new features"
+            echo ""
+            echo "Or be a descriptive title (10+ chars, starting with capital)"
+            exit 1
+          fi
+
+  summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - shellcheck
+      - validate-scripts
+      - build-image
+      - unit-tests
+      - integration-tests
+      - pr-title-check
+    steps:
+      - name: Check job results
+        run: |
+          echo "Shellcheck: ${{ needs.shellcheck.result }}"
+          echo "Validate Scripts: ${{ needs.validate-scripts.result }}"
+          echo "Build Image: ${{ needs.build-image.result }}"
+          echo "Unit Tests: ${{ needs.unit-tests.result }}"
+          echo "Integration Tests: ${{ needs.integration-tests.result }}"
+          echo "PR Title Check: ${{ needs.pr-title-check.result }}"
+
+          # Fail if any required job failed
+          if [[ "${{ needs.shellcheck.result }}" == "failure" ]] || \
+             [[ "${{ needs.validate-scripts.result }}" == "failure" ]] || \
+             [[ "${{ needs.build-image.result }}" == "failure" ]]; then
+            echo "ERROR: One or more required checks failed"
+            exit 1
+          fi
+
+          # Integration tests are optional (only run on PRs)
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if [[ "${{ needs.integration-tests.result }}" == "failure" ]]; then
+              echo "WARNING: Integration tests failed"
+              exit 1
+            fi
+          fi
+
+          echo "All checks passed!"
