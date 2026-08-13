@@ -53,6 +53,19 @@ oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest -
 - `/debug/goroutine` — goroutine stack dump
 - `/debug/heap` — heap memory profile
 
+### Optional: Diagnostic Bundle (Experimental)
+To collect Central's comprehensive diagnostic bundle with PostgreSQL deep diagnostics, telemetry, auth config, and multi-cluster data:
+
+```sh
+oc adm must-gather \
+  --image=quay.io/rhn_support_shaising/acs-must-gather:latest \
+  -- /usr/bin/gather \
+  GATHER_DIAGNOSTIC_BUNDLE=true
+```
+
+**Note**: Requires Central running and admin password in Secret. Adds 2-10 minutes to collection time.
+See `FEATURE_DIAGNOSTIC_BUNDLE.md` for details.
+
 ### Optional: Debug Dump (Experimental)
 To collect Central's debug dump with CPU profiling for performance debugging:
 

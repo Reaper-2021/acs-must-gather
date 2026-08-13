@@ -1,0 +1,161 @@
+#!/bin/bash
+
+# ACS Must-Gather - Diagnostic Bundle Collection
+# Collects comprehensive production troubleshooting bundle from Central.
+# Requires authentication to Central API.
+
+# shellcheck source=collection-scripts/common.sh
+source /usr/bin/common.sh
+
+log_msg "--- gather_diagnostic_bundle: starting ---"
+
+DIAG_DIR="${MUST_GATHER_DIR}/acs-diagnostics"
+mkdir -p "${DIAG_DIR}"
+
+# ---------- Find running Central pod ----------
+CENTRAL_POD=""
+CENTRAL_NS=""
+
+while IFS= read -r ns; do
+    [[ -z "${ns}" ]] && continue
+    pod=$(oc get pods -n "${ns}" -l app=central \
+        --field-selector=status.phase=Running \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+    if [[ -n "${pod}" ]]; then
+        CENTRAL_POD="${pod}"
+        CENTRAL_NS="${ns}"
+        break
+    fi
+done <<< "${ACS_NAMESPACES}"
+
+if [[ -z "${CENTRAL_POD}" ]]; then
+    log_msg "WARNING: No running Central pod found. Skipping diagnostic bundle collection."
+    echo "No running Central pod found." > "${DIAG_DIR}/diagnostic-bundle-error.txt"
+    exit 0
+fi
+
+log_msg "Found Central pod: ${CENTRAL_POD} in namespace ${CENTRAL_NS}"
+
+# ---------- Get authentication credentials ----------
+log_msg "Retrieving Central admin credentials..."
+
+# Try to get admin password from htpasswd secret
+ADMIN_PASSWORD=""
+ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" central-htpasswd \
+    -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+
+if [[ -z "${ADMIN_PASSWORD}" ]]; then
+    log_msg "WARNING: Could not retrieve admin password from central-htpasswd secret."
+    log_msg "Trying alternative secret names..."
+
+    # Try stackrox-admin-password secret (older versions)
+    ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" stackrox-admin-password \
+        -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+fi
+
+if [[ -z "${ADMIN_PASSWORD}" ]]; then
+    log_msg "ERROR: Could not retrieve Central admin password. Diagnostic bundle requires authentication."
+    cat > "${DIAG_DIR}/diagnostic-bundle-error.txt" <<EOF
+Could not retrieve Central admin password for authentication.
+
+The diagnostic bundle endpoint (/api/extensions/diagnostics) requires authentication.
+
+Tried secrets:
+- central-htpasswd (namespace: ${CENTRAL_NS})
+- stackrox-admin-password (namespace: ${CENTRAL_NS})
+
+To collect diagnostic bundle manually:
+1. Get admin password: oc get secret -n ${CENTRAL_NS} central-htpasswd -o jsonpath='{.data.password}' | base64 -d
+2. Forward port: oc port-forward -n ${CENTRAL_NS} ${CENTRAL_POD} 8443:8443
+3. Download bundle: curl -k -u admin:<password> https://localhost:8443/api/extensions/diagnostics -o diagnostic-bundle.zip
+
+Alternatively, use roxctl:
+  roxctl -e <central-url> central debug download-diagnostics
+EOF
+    exit 0
+fi
+
+log_msg "Successfully retrieved admin credentials"
+
+# ---------- Set up port-forward ----------
+log_msg "Setting up port-forward to Central pod..."
+
+# Find an available local port
+LOCAL_PORT=8443
+while lsof -Pi :${LOCAL_PORT} -sTCP:LISTEN -t >/dev/null 2>&1; do
+    LOCAL_PORT=$((LOCAL_PORT + 1))
+    if [[ ${LOCAL_PORT} -gt 9000 ]]; then
+        log_msg "ERROR: Could not find available port for port-forward"
+        echo "Could not find available port" > "${DIAG_DIR}/diagnostic-bundle-error.txt"
+        exit 0
+    fi
+done
+
+log_msg "Using local port ${LOCAL_PORT} for port-forward"
+
+# Start port-forward in background
+oc port-forward -n "${CENTRAL_NS}" "${CENTRAL_POD}" "${LOCAL_PORT}:8443" >/dev/null 2>&1 &
+PF_PID=$!
+
+# Wait for port-forward to establish
+sleep 3
+
+# Verify port-forward is working
+if ! kill -0 "${PF_PID}" 2>/dev/null; then
+    log_msg "ERROR: Port-forward process died"
+    echo "Port-forward failed to establish" > "${DIAG_DIR}/diagnostic-bundle-error.txt"
+    exit 0
+fi
+
+log_msg "Port-forward established (PID: ${PF_PID})"
+
+# ---------- Collect diagnostic bundle ----------
+BUNDLE_TIMEOUT="${DIAGNOSTIC_BUNDLE_TIMEOUT:-600}"  # 10 minutes default
+log_msg "Collecting diagnostic bundle (timeout: ${BUNDLE_TIMEOUT}s, may take several minutes)..."
+
+timeout "${BUNDLE_TIMEOUT}" \
+    curl -sSk -u "admin:${ADMIN_PASSWORD}" \
+    "https://localhost:${LOCAL_PORT}/api/extensions/diagnostics" \
+    -o "${DIAG_DIR}/stackrox-diagnostic-bundle.zip" 2>/dev/null
+
+CURL_EXIT=$?
+
+# Clean up port-forward
+kill "${PF_PID}" 2>/dev/null || true
+wait "${PF_PID}" 2>/dev/null || true
+
+# ---------- Check collection result ----------
+if [[ ${CURL_EXIT} -eq 124 ]]; then
+    log_msg "WARNING: Diagnostic bundle collection timed out after ${BUNDLE_TIMEOUT}s"
+    rm -f "${DIAG_DIR}/stackrox-diagnostic-bundle.zip"
+    cat > "${DIAG_DIR}/diagnostic-bundle-error.txt" <<EOF
+Diagnostic bundle collection timed out after ${BUNDLE_TIMEOUT}s
+
+This can happen with large multi-cluster deployments.
+
+To increase timeout, set environment variable:
+  DIAGNOSTIC_BUNDLE_TIMEOUT=1200  # 20 minutes
+
+To collect with filters:
+1. Get admin password: oc get secret -n ${CENTRAL_NS} central-htpasswd -o jsonpath='{.data.password}' | base64 -d
+2. Forward port: oc port-forward -n ${CENTRAL_NS} ${CENTRAL_POD} 8443:8443
+3. Download with filters:
+   # Filter by cluster:
+   curl -k -u admin:<password> "https://localhost:8443/api/extensions/diagnostics?cluster=<cluster-name>" -o bundle.zip
+
+   # Database only (faster):
+   curl -k -u admin:<password> "https://localhost:8443/api/extensions/diagnostics?database-only=true" -o bundle.zip
+EOF
+elif [[ ${CURL_EXIT} -ne 0 ]]; then
+    log_msg "WARNING: Diagnostic bundle collection failed (exit code: ${CURL_EXIT})"
+    rm -f "${DIAG_DIR}/stackrox-diagnostic-bundle.zip"
+    echo "Diagnostic bundle collection failed (curl exit code: ${CURL_EXIT})" > "${DIAG_DIR}/diagnostic-bundle-error.txt"
+elif [[ ! -f "${DIAG_DIR}/stackrox-diagnostic-bundle.zip" ]]; then
+    log_msg "WARNING: Diagnostic bundle file not created"
+    echo "Diagnostic bundle file not created (unknown error)" > "${DIAG_DIR}/diagnostic-bundle-error.txt"
+else
+    BUNDLE_SIZE=$(du -h "${DIAG_DIR}/stackrox-diagnostic-bundle.zip" 2>/dev/null | awk '{print $1}')
+    log_msg "Successfully collected diagnostic bundle (${BUNDLE_SIZE})"
+fi
+
+log_msg "--- gather_diagnostic_bundle: complete ---"

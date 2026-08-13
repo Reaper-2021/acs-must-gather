@@ -73,6 +73,12 @@ if [[ "${GATHER_DIAGNOSTICS:-true}" == "true" ]] && [[ -n "${ACS_NAMESPACES}" ]]
     log_msg "Launched gather_diagnostics (PID: ${PIDS[-1]})"
 fi
 
+if [[ "${GATHER_DIAGNOSTIC_BUNDLE:-false}" == "true" ]] && [[ -n "${ACS_NAMESPACES}" ]]; then
+    /usr/bin/gather_diagnostic_bundle &
+    PIDS+=($!)
+    log_msg "Launched gather_diagnostic_bundle (PID: ${PIDS[-1]})"
+fi
+
 if [[ "${GATHER_DEBUG_DUMP:-false}" == "true" ]] && [[ -n "${ACS_NAMESPACES}" ]]; then
     /usr/bin/gather_debug_dump &
     PIDS+=($!)
