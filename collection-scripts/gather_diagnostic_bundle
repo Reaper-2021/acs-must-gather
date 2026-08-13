@@ -109,13 +109,48 @@ fi
 
 log_msg "Port-forward established (PID: ${PF_PID})"
 
+# ---------- Build query parameters ----------
+QUERY_PARAMS=""
+
+# Add cluster filter if specified
+if [[ -n "${DIAGNOSTIC_BUNDLE_CLUSTER:-}" ]]; then
+    QUERY_PARAMS="${QUERY_PARAMS}&cluster=${DIAGNOSTIC_BUNDLE_CLUSTER}"
+    log_msg "Filtering by cluster: ${DIAGNOSTIC_BUNDLE_CLUSTER}"
+fi
+
+# Add custom log window if specified
+if [[ -n "${DIAGNOSTIC_BUNDLE_SINCE:-}" ]]; then
+    QUERY_PARAMS="${QUERY_PARAMS}&since=${DIAGNOSTIC_BUNDLE_SINCE}"
+    log_msg "Custom log window: since ${DIAGNOSTIC_BUNDLE_SINCE}"
+fi
+
+# Add database-only mode if specified
+if [[ "${DIAGNOSTIC_BUNDLE_DATABASE_ONLY:-false}" == "true" ]]; then
+    QUERY_PARAMS="${QUERY_PARAMS}&database-only=true"
+    log_msg "Database-only mode enabled (faster collection)"
+fi
+
+# Add compliance operator if specified
+if [[ "${DIAGNOSTIC_BUNDLE_COMPLIANCE_OPERATOR:-false}" == "true" ]]; then
+    QUERY_PARAMS="${QUERY_PARAMS}&compliance-operator=true"
+    log_msg "Compliance Operator data will be included"
+fi
+
+# Remove leading '&' if any params were added
+if [[ -n "${QUERY_PARAMS}" ]]; then
+    QUERY_PARAMS="?${QUERY_PARAMS:1}"
+fi
+
 # ---------- Collect diagnostic bundle ----------
 BUNDLE_TIMEOUT="${DIAGNOSTIC_BUNDLE_TIMEOUT:-600}"  # 10 minutes default
+BUNDLE_URL="https://localhost:${LOCAL_PORT}/api/extensions/diagnostics${QUERY_PARAMS}"
+
 log_msg "Collecting diagnostic bundle (timeout: ${BUNDLE_TIMEOUT}s, may take several minutes)..."
+log_msg "Endpoint: /api/extensions/diagnostics${QUERY_PARAMS}"
 
 timeout "${BUNDLE_TIMEOUT}" \
     curl -sSk -u "admin:${ADMIN_PASSWORD}" \
-    "https://localhost:${LOCAL_PORT}/api/extensions/diagnostics" \
+    "${BUNDLE_URL}" \
     -o "${DIAG_DIR}/stackrox-diagnostic-bundle.zip" 2>/dev/null
 
 CURL_EXIT=$?
@@ -133,18 +168,33 @@ Diagnostic bundle collection timed out after ${BUNDLE_TIMEOUT}s
 
 This can happen with large multi-cluster deployments.
 
-To increase timeout, set environment variable:
-  DIAGNOSTIC_BUNDLE_TIMEOUT=1200  # 20 minutes
+Recommended solutions:
 
-To collect with filters:
-1. Get admin password: oc get secret -n ${CENTRAL_NS} central-htpasswd -o jsonpath='{.data.password}' | base64 -d
-2. Forward port: oc port-forward -n ${CENTRAL_NS} ${CENTRAL_POD} 8443:8443
-3. Download with filters:
-   # Filter by cluster:
-   curl -k -u admin:<password> "https://localhost:8443/api/extensions/diagnostics?cluster=<cluster-name>" -o bundle.zip
+1. Increase timeout (large deployments):
+   DIAGNOSTIC_BUNDLE_TIMEOUT=1200  # 20 minutes
 
-   # Database only (faster):
-   curl -k -u admin:<password> "https://localhost:8443/api/extensions/diagnostics?database-only=true" -o bundle.zip
+2. Filter by specific cluster (faster):
+   DIAGNOSTIC_BUNDLE_CLUSTER=production-us-east
+
+3. Database-only mode (fastest, ~1-2 minutes):
+   DIAGNOSTIC_BUNDLE_DATABASE_ONLY=true
+
+4. Custom log window:
+   DIAGNOSTIC_BUNDLE_SINCE=2026-08-13T10:00:00Z
+
+Example:
+  oc adm must-gather \\
+    --image=quay.io/rhn_support_shaising/acs-must-gather:latest \\
+    -- /usr/bin/gather \\
+    GATHER_DIAGNOSTIC_BUNDLE=true \\
+    DIAGNOSTIC_BUNDLE_DATABASE_ONLY=true
+
+Manual collection (alternative):
+  1. Get admin password: oc get secret -n ${CENTRAL_NS} central-htpasswd -o jsonpath='{.data.password}' | base64 -d
+  2. Forward port: oc port-forward -n ${CENTRAL_NS} ${CENTRAL_POD} 8443:8443
+  3. Download: curl -k -u admin:<password> "https://localhost:8443/api/extensions/diagnostics?database-only=true" -o bundle.zip
+
+See FEATURE_DIAGNOSTIC_BUNDLE.md for all options.
 EOF
 elif [[ ${CURL_EXIT} -ne 0 ]]; then
     log_msg "WARNING: Diagnostic bundle collection failed (exit code: ${CURL_EXIT})"
@@ -156,6 +206,12 @@ elif [[ ! -f "${DIAG_DIR}/stackrox-diagnostic-bundle.zip" ]]; then
 else
     BUNDLE_SIZE=$(du -h "${DIAG_DIR}/stackrox-diagnostic-bundle.zip" 2>/dev/null | awk '{print $1}')
     log_msg "Successfully collected diagnostic bundle (${BUNDLE_SIZE})"
+
+    # Warn if bundle is unusually large
+    BUNDLE_SIZE_BYTES=$(stat -f%z "${DIAG_DIR}/stackrox-diagnostic-bundle.zip" 2>/dev/null || stat -c%s "${DIAG_DIR}/stackrox-diagnostic-bundle.zip" 2>/dev/null)
+    if [[ ${BUNDLE_SIZE_BYTES} -gt 209715200 ]]; then  # >200MB
+        log_msg "WARNING: Diagnostic bundle is large (${BUNDLE_SIZE}). This may indicate a very large deployment or long log retention."
+    fi
 fi
 
 log_msg "--- gather_diagnostic_bundle: complete ---"
