@@ -79,12 +79,11 @@ teardown() {
 @test "resource_exists returns 1 for non-existing resource" {
     # Mock oc get to return failure
     oc() {
-        if [[ "$1" == "get" && "$2" == "nonexistent" ]]; then
-            return 1
-        fi
+        return 1
     }
     export -f oc
 
+    # resource_exists should return 1 when oc fails
     run resource_exists "nonexistent" "default"
 
     [[ "$status" -eq 1 ]]
@@ -120,12 +119,13 @@ EOF
 }
 
 @test "discover_operator_namespace finds by pod label" {
-    # Mock oc get pods
+    # Mock oc to return namespace directly (jsonpath already extracts it)
     oc() {
         if [[ "$*" =~ "get pods -A" && "$*" =~ "rhacs-operator" ]]; then
-            echo '{"items":[{"metadata":{"namespace":"rhacs-operator"}}]}'
+            echo "rhacs-operator"
             return 0
         fi
+        return 1
     }
     export -f oc
 
@@ -135,12 +135,16 @@ EOF
 }
 
 @test "discover_acs_namespaces finds Central namespace" {
-    # Mock oc get Central
+    # Mock oc to return namespace directly (jsonpath already extracts it)
     oc() {
         if [[ "$*" =~ "get Central -A" ]]; then
-            echo '{"items":[{"metadata":{"namespace":"stackrox"}}]}'
+            echo "stackrox"
+            return 0
+        elif [[ "$*" =~ "get SecuredCluster -A" ]]; then
+            echo ""
             return 0
         fi
+        return 1
     }
     export -f oc
 

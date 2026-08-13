@@ -42,8 +42,9 @@ jobs:
           done
 
       - name: Check for trailing whitespace
+        if: github.event_name == 'pull_request'
         run: |
-          if git diff --check HEAD~1 ':(exclude)*.md'; then
+          if git diff --check ${{ github.event.pull_request.base.sha }} ':(exclude)*.md'; then
             echo "No trailing whitespace found"
           else
             echo "ERROR: Trailing whitespace detected"
@@ -69,8 +70,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image
-        run: make build
+      - name: Build image with Docker
+        run: |
+          docker build --platform linux/amd64 -t acs-must-gather:latest .
 
       - name: Save image
         run: |
