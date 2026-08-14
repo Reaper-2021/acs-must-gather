@@ -152,3 +152,79 @@ EOF
 
     [[ "$result" == "stackrox" ]]
 }
+
+@test "find_central_pod discovers a running Central pod" {
+    export ACS_NAMESPACES="stackrox"
+    oc() {
+        [[ "$*" =~ "get pods" ]] && { echo "central-abc123"; return 0; }
+        return 1
+    }
+    export -f oc
+
+    find_central_pod
+
+    [[ "$CENTRAL_POD" == "central-abc123" ]]
+    [[ "$CENTRAL_NS" == "stackrox" ]]
+}
+
+@test "find_central_pod returns 1 when no Central pod is running" {
+    export ACS_NAMESPACES="stackrox"
+    oc() { echo ""; return 0; }
+    export -f oc
+
+    run find_central_pod
+
+    [[ "$status" -eq 1 ]]
+}
+
+@test "get_central_admin_password reads central-htpasswd secret" {
+    oc() {
+        if [[ "$*" =~ "central-htpasswd" ]]; then
+            printf '%s' "s3cret" | base64
+            return 0
+        fi
+        return 1
+    }
+    export -f oc
+
+    result=$(get_central_admin_password "stackrox")
+
+    [[ "$result" == "s3cret" ]]
+}
+
+@test "get_central_admin_password falls back to legacy secret" {
+    oc() {
+        if [[ "$*" =~ "central-htpasswd" ]]; then
+            echo ""
+            return 0
+        elif [[ "$*" =~ "stackrox-admin-password" ]]; then
+            printf '%s' "legacy-pw" | base64
+            return 0
+        fi
+        return 1
+    }
+    export -f oc
+
+    result=$(get_central_admin_password "stackrox")
+
+    [[ "$result" == "legacy-pw" ]]
+}
+
+@test "curl_central_download keeps the password off the curl command line" {
+    # Strip the timeout duration and run the remaining command.
+    timeout() { shift; "$@"; }
+    export -f timeout
+    # Record every argument curl is invoked with.
+    curl() {
+        printf '%s\n' "$@" >> "${MUST_GATHER_DIR}/curl-args.txt"
+        return 0
+    }
+    export -f curl
+
+    curl_central_download "https://localhost:8443/test" \
+        "${MUST_GATHER_DIR}/out.zip" 5 "topsecret"
+
+    # Password must be passed via --config file, never as an argument.
+    grep -q -- "--config" "${MUST_GATHER_DIR}/curl-args.txt"
+    ! grep -q "topsecret" "${MUST_GATHER_DIR}/curl-args.txt"
+}

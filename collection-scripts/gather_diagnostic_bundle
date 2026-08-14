@@ -13,22 +13,7 @@ DIAG_DIR="${MUST_GATHER_DIR}/acs-diagnostics"
 mkdir -p "${DIAG_DIR}"
 
 # ---------- Find running Central pod ----------
-CENTRAL_POD=""
-CENTRAL_NS=""
-
-while IFS= read -r ns; do
-    [[ -z "${ns}" ]] && continue
-    pod=$(oc get pods -n "${ns}" -l app=central \
-        --field-selector=status.phase=Running \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
-    if [[ -n "${pod}" ]]; then
-        CENTRAL_POD="${pod}"
-        CENTRAL_NS="${ns}"
-        break
-    fi
-done <<< "${ACS_NAMESPACES}"
-
-if [[ -z "${CENTRAL_POD}" ]]; then
+if ! find_central_pod; then
     log_msg "WARNING: No running Central pod found. Skipping diagnostic bundle collection."
     echo "No running Central pod found." > "${DIAG_DIR}/diagnostic-bundle-error.txt"
     exit 0
@@ -39,19 +24,7 @@ log_msg "Found Central pod: ${CENTRAL_POD} in namespace ${CENTRAL_NS}"
 # ---------- Get authentication credentials ----------
 log_msg "Retrieving Central admin credentials..."
 
-# Try to get admin password from htpasswd secret
-ADMIN_PASSWORD=""
-ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" central-htpasswd \
-    -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
-
-if [[ -z "${ADMIN_PASSWORD}" ]]; then
-    log_msg "WARNING: Could not retrieve admin password from central-htpasswd secret."
-    log_msg "Trying alternative secret names..."
-
-    # Try stackrox-admin-password secret (older versions)
-    ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" stackrox-admin-password \
-        -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
-fi
+ADMIN_PASSWORD="$(get_central_admin_password "${CENTRAL_NS}")"
 
 if [[ -z "${ADMIN_PASSWORD}" ]]; then
     log_msg "ERROR: Could not retrieve Central admin password. Diagnostic bundle requires authentication."
@@ -80,34 +53,10 @@ log_msg "Successfully retrieved admin credentials"
 # ---------- Set up port-forward ----------
 log_msg "Setting up port-forward to Central pod..."
 
-# Find an available local port
-LOCAL_PORT=8443
-while lsof -Pi :${LOCAL_PORT} -sTCP:LISTEN -t >/dev/null 2>&1; do
-    LOCAL_PORT=$((LOCAL_PORT + 1))
-    if [[ ${LOCAL_PORT} -gt 9000 ]]; then
-        log_msg "ERROR: Could not find available port for port-forward"
-        echo "Could not find available port" > "${DIAG_DIR}/diagnostic-bundle-error.txt"
-        exit 0
-    fi
-done
-
-log_msg "Using local port ${LOCAL_PORT} for port-forward"
-
-# Start port-forward in background
-oc port-forward -n "${CENTRAL_NS}" "${CENTRAL_POD}" "${LOCAL_PORT}:8443" >/dev/null 2>&1 &
-PF_PID=$!
-
-# Wait for port-forward to establish
-sleep 3
-
-# Verify port-forward is working
-if ! kill -0 "${PF_PID}" 2>/dev/null; then
-    log_msg "ERROR: Port-forward process died"
+if ! start_central_port_forward "${CENTRAL_NS}" "${CENTRAL_POD}"; then
     echo "Port-forward failed to establish" > "${DIAG_DIR}/diagnostic-bundle-error.txt"
     exit 0
 fi
-
-log_msg "Port-forward established (PID: ${PF_PID})"
 
 # ---------- Build query parameters ----------
 QUERY_PARAMS=""
@@ -148,16 +97,14 @@ BUNDLE_URL="https://localhost:${LOCAL_PORT}/api/extensions/diagnostics${QUERY_PA
 log_msg "Collecting diagnostic bundle (timeout: ${BUNDLE_TIMEOUT}s, may take several minutes)..."
 log_msg "Endpoint: /api/extensions/diagnostics${QUERY_PARAMS}"
 
-timeout "${BUNDLE_TIMEOUT}" \
-    curl -sSk -u "admin:${ADMIN_PASSWORD}" \
-    "${BUNDLE_URL}" \
-    -o "${DIAG_DIR}/stackrox-diagnostic-bundle.zip" 2>/dev/null
+curl_central_download "${BUNDLE_URL}" \
+    "${DIAG_DIR}/stackrox-diagnostic-bundle.zip" \
+    "${BUNDLE_TIMEOUT}" "${ADMIN_PASSWORD}"
 
 CURL_EXIT=$?
 
 # Clean up port-forward
-kill "${PF_PID}" 2>/dev/null || true
-wait "${PF_PID}" 2>/dev/null || true
+stop_central_port_forward
 
 # ---------- Check collection result ----------
 if [[ ${CURL_EXIT} -eq 124 ]]; then

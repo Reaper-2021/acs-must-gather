@@ -12,22 +12,7 @@ DIAG_DIR="${MUST_GATHER_DIR}/acs-diagnostics"
 mkdir -p "${DIAG_DIR}"
 
 # ---------- Find running Central pod ----------
-CENTRAL_POD=""
-CENTRAL_NS=""
-
-while IFS= read -r ns; do
-    [[ -z "${ns}" ]] && continue
-    pod=$(oc get pods -n "${ns}" -l app=central \
-        --field-selector=status.phase=Running \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
-    if [[ -n "${pod}" ]]; then
-        CENTRAL_POD="${pod}"
-        CENTRAL_NS="${ns}"
-        break
-    fi
-done <<< "${ACS_NAMESPACES}"
-
-if [[ -z "${CENTRAL_POD}" ]]; then
+if ! find_central_pod; then
     log_msg "WARNING: No running Central pod found. Skipping diagnostic collection."
     echo "No running Central pod found." > "${DIAG_DIR}/collection-error.txt"
     exit 0
@@ -41,6 +26,9 @@ collect_endpoint() {
     local output_file="$3"
 
     log_msg "  Collecting ${name}: ${path}"
+    # -k is intentional: the request runs inside the Central pod against its own
+    # localhost endpoint, which serves a self-signed cert, so CA verification
+    # does not apply.
     timeout "${DIAG_TIMEOUT}" \
         oc exec -n "${CENTRAL_NS}" "${CENTRAL_POD}" -c central -- \
         curl -sSk "https://localhost:8443${path}" \
