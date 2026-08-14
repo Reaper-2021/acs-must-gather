@@ -73,6 +73,12 @@ if [[ "${GATHER_DIAGNOSTICS:-true}" == "true" ]] && [[ -n "${ACS_NAMESPACES}" ]]
     log_msg "Launched gather_diagnostics (PID: ${PIDS[-1]})"
 fi
 
+if [[ "${GATHER_DIAGNOSTIC_BUNDLE:-true}" == "true" ]] && [[ -n "${ACS_NAMESPACES}" ]]; then
+    /usr/bin/gather_diagnostic_bundle &
+    PIDS+=($!)
+    log_msg "Launched gather_diagnostic_bundle (PID: ${PIDS[-1]})"
+fi
+
 # ---------- Wait for all sub-gatherers ----------
 if [[ ${#PIDS[@]} -gt 0 ]]; then
     log_msg "Waiting on ${#PIDS[@]} sub-gatherers..."
