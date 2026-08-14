@@ -53,6 +53,44 @@ oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest -
 - `/debug/goroutine` — goroutine stack dump
 - `/debug/heap` — heap memory profile
 
+### Optional: Diagnostic Bundle (Experimental)
+To collect Central's comprehensive diagnostic bundle with PostgreSQL deep diagnostics, telemetry, auth config, and multi-cluster data:
+
+```sh
+oc adm must-gather \
+  --image=quay.io/rhn_support_shaising/acs-must-gather:latest \
+  -- /usr/bin/gather \
+  GATHER_DIAGNOSTIC_BUNDLE=true
+```
+
+**Advanced Options:**
+```sh
+# Filter by specific cluster (faster)
+oc adm must-gather \
+  --image=quay.io/rhn_support_shaising/acs-must-gather:latest \
+  -- /usr/bin/gather \
+  GATHER_DIAGNOSTIC_BUNDLE=true \
+  DIAGNOSTIC_BUNDLE_CLUSTER=production-us-east
+
+# Database-only mode (fastest, ~1-2 minutes)
+oc adm must-gather \
+  --image=quay.io/rhn_support_shaising/acs-must-gather:latest \
+  -- /usr/bin/gather \
+  GATHER_DIAGNOSTIC_BUNDLE=true \
+  DIAGNOSTIC_BUNDLE_DATABASE_ONLY=true
+```
+
+**Note**: Requires Central running and admin password in Secret. Adds 2-10 minutes to collection time.
+
+**Comparison with Official Methods:**
+| Method | Best For | Limitations |
+|--------|----------|-------------|
+| **acs-must-gather** | Complete troubleshooting data (bundle + K8s + operator) | Slower, requires cluster admin |
+| **roxctl CLI** | Quick diagnostics with external access | Requires route, no K8s resources |
+| **Web Console** | One-click UI download | Manual, no K8s resources |
+
+See `FEATURE_DIAGNOSTIC_BUNDLE.md` for complete comparison and details.
+
 ### Optional: Debug Dump (Experimental)
 To collect Central's debug dump with CPU profiling for performance debugging:
 
@@ -103,6 +141,17 @@ See `FEATURE_DEBUG_DUMP.md` for complete comparison and pprof analysis guide.
 | `GATHER_DIAGNOSTICS` | Enable Central diagnostic endpoint collection | `true` |
 | `INSPECT_TIMEOUT` | Timeout per `oc adm inspect` call (seconds) | `120` |
 | `DIAG_TIMEOUT` | Timeout per diagnostic endpoint call (seconds) | `30` |
+
+### Diagnostic Bundle (Optional)
+
+| Variable | Description | Default |
+|---|---|---|
+| `GATHER_DIAGNOSTIC_BUNDLE` | Enable comprehensive diagnostic bundle collection | `false` |
+| `DIAGNOSTIC_BUNDLE_TIMEOUT` | Collection timeout (seconds) | `600` (10 min) |
+| `DIAGNOSTIC_BUNDLE_CLUSTER` | Filter by specific cluster name | (all clusters) |
+| `DIAGNOSTIC_BUNDLE_SINCE` | Custom log window (ISO 8601 timestamp) | (20 minutes) |
+| `DIAGNOSTIC_BUNDLE_DATABASE_ONLY` | Collect only database diagnostics (faster) | `false` |
+| `DIAGNOSTIC_BUNDLE_COMPLIANCE_OPERATOR` | Include compliance operator data | `false` |
 
 ### Debug Dump (Optional)
 
