@@ -1,8 +1,8 @@
 # Feature: RHACS Diagnostic Bundle (`acs-diagnostic-bundle`)
 
-This branch adds the `acs-diagnostic-bundle` collector to acs-must-gather. It is
-merged into `main` — see the README on `main` for the complete picture of the
-codebase.
+This branch adds the `acs-diagnostic-bundle` collector to acs-must-gather. It was
+merged into `main` via [PR #7](https://github.com/Reaper-2021/acs-must-gather/pull/7)
+— see the README on `main` for the complete picture of the codebase.
 
 ## What this branch brings to main
 
