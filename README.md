@@ -10,10 +10,11 @@ oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest
 
 This collects data related to ACS components only. For general cluster diagnostics, run `oc adm must-gather` without a custom image.
 
-The image collects two complementary layers of data:
+The image collects three complementary layers of data:
 
 - **acs-must-gather** collects platform-specific data about the OpenShift cluster where RHACS is running (operator, workloads, cluster-scoped resources, RBAC, logs).
 - **acs-diagnostic-bundle** collects deep RHACS-related data — the full diagnostic bundle produced by `roxctl central debug download-diagnostics` — from Central and every connected Secured Cluster.
+- **acs-debug-dump** collects Central's debug dump — the deepest, Central-focused profiling data produced by `roxctl central debug dump`, including a 30-second CPU profile.
 
 ### Time-bounded collection
 
@@ -77,6 +78,23 @@ from the `central-htpasswd` secret (falling back to `stackrox-admin-password`), 
 Central is reached over an `oc port-forward` since Central container images do not
 ship `curl`.
 
+### Central Debug Dump
+
+Extracted into the `acs-debug-dump/` folder. This is Central's debug dump,
+produced by `roxctl central debug dump` and downloaded from Central's
+`/debug/dump` endpoint, then unpacked so it is browsable within the must-gather.
+It is the deepest, Central-focused diagnostic layer and includes:
+
+- A 30-second CPU profile, plus heap, goroutine, and mutex profiles
+- Two Prometheus metrics passes and Central-DB (PostgreSQL) data
+- Central version, system access control, notifiers, and log-imbue data
+
+Because the CPU profile briefly adds load to Central, this collector can be
+turned off with `GATHER_DEBUG_DUMP=false`. Like the diagnostic bundle, it
+authenticates with the admin password from the `central-htpasswd` secret
+(falling back to `stackrox-admin-password`) over an `oc port-forward`, since
+Central container images do not ship `curl`.
+
 ## Environment Variables
 
 | Variable | Description | Default |
@@ -93,6 +111,9 @@ ship `curl`.
 | `DIAG_BUNDLE_CLUSTERS` | Comma-separated Secured Cluster names to include (`--clusters`) | (all clusters) |
 | `DIAG_BUNDLE_COMPLIANCE_OPERATOR` | Include Compliance Operator resources (`--with-compliance-operator`) | `false` |
 | `DIAG_BUNDLE_DATABASE_ONLY` | Collect only Central-DB diagnostics (`--with-database-only`) | `false` |
+| `GATHER_DEBUG_DUMP` | Enable Central debug dump collection | `true` |
+| `DEBUG_DUMP_TIMEOUT` | Timeout for the debug dump download (seconds) | `300` |
+| `DEBUG_DUMP_LOGS` | Include Central logs in the dump (`roxctl central debug dump --logs`) | `false` |
 
 ## Building
 

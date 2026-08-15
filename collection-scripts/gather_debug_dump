@@ -1,0 +1,167 @@
+#!/bin/bash
+
+# ACS Must-Gather - RHACS Central Debug Dump
+#
+# Collects Central's debug dump - the same data produced by
+# "roxctl central debug dump" - and extracts it into the acs-debug-dump/
+# folder of the must-gather.
+#
+# This is the deepest, Central-focused diagnostic layer. Unlike the diagnostic
+# bundle (broad Kubernetes introspection across every Secured Cluster, no CPU
+# profile), the debug dump concentrates on Central itself and adds a 30-second
+# CPU profile plus heap / goroutine / mutex profiles, two Prometheus metrics
+# passes, Central-DB (Postgres) data, access control, notifiers, and log-imbue.
+# Because the CPU profile briefly loads Central, this collector exists as its
+# own opt-out step (GATHER_DEBUG_DUMP).
+#
+# Central serves the dump at GET /debug/dump, which requires admin
+# authentication. Central container images do not ship curl/wget, so we
+# port-forward to Central and download the dump with curl from this
+# (must-gather) container, authenticating with the admin password from the
+# central-htpasswd secret.
+
+# shellcheck source=collection-scripts/common.sh
+source /usr/bin/common.sh
+
+log_msg "--- gather_debug_dump: starting ---"
+
+DUMP_DIR="${MUST_GATHER_DIR}/acs-debug-dump"
+mkdir -p "${DUMP_DIR}"
+
+# The dump includes a 30s CPU profile, so allow a generous default timeout.
+DUMP_TIMEOUT="${DEBUG_DUMP_TIMEOUT:-300}"
+
+# ---------- Find running Central pod ----------
+CENTRAL_POD=""
+CENTRAL_NS=""
+
+while IFS= read -r ns; do
+    [[ -z "${ns}" ]] && continue
+    pod=$(oc get pods -n "${ns}" -l app=central \
+        --field-selector=status.phase=Running \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+    if [[ -n "${pod}" ]]; then
+        CENTRAL_POD="${pod}"
+        CENTRAL_NS="${ns}"
+        break
+    fi
+done <<< "${ACS_NAMESPACES}"
+
+if [[ -z "${CENTRAL_POD}" ]]; then
+    log_msg "WARNING: No running Central pod found. Skipping debug dump collection."
+    echo "No running Central pod found." > "${DUMP_DIR}/collection-error.txt"
+    exit 0
+fi
+
+log_msg "Found Central pod: ${CENTRAL_POD} in namespace ${CENTRAL_NS}"
+
+# ---------- Retrieve admin credentials ----------
+# The debug dump endpoint requires admin authentication. Try the current
+# central-htpasswd secret first, then the legacy secret name.
+ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" central-htpasswd \
+    -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+if [[ -z "${ADMIN_PASSWORD}" ]]; then
+    ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" stackrox-admin-password \
+        -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+fi
+if [[ -z "${ADMIN_PASSWORD}" ]]; then
+    log_msg "WARNING: Could not retrieve Central admin password; cannot download debug dump."
+    echo "Could not retrieve Central admin password (checked central-htpasswd and stackrox-admin-password)." \
+        > "${DUMP_DIR}/collection-error.txt"
+    exit 0
+fi
+
+# ---------- Set up port-forward to Central ----------
+# Let oc/kubectl pick a free local port and report it, so this can run
+# concurrently with other port-forwarding gatherers without racing on a port.
+PF_LOG="$(mktemp)"
+oc port-forward -n "${CENTRAL_NS}" "${CENTRAL_POD}" ":8443" > "${PF_LOG}" 2>&1 &
+PF_PID=$!
+
+LOCAL_PORT=""
+for _ in $(seq 1 20); do
+    LOCAL_PORT=$(grep -oE 'Forwarding from 127\.0\.0\.1:[0-9]+' "${PF_LOG}" 2>/dev/null \
+        | grep -oE '[0-9]+$' | head -1)
+    [[ -n "${LOCAL_PORT}" ]] && break
+    kill -0 "${PF_PID}" 2>/dev/null || break
+    sleep 0.5
+done
+
+if [[ -z "${LOCAL_PORT}" ]] || ! kill -0 "${PF_PID}" 2>/dev/null; then
+    log_msg "ERROR: Port-forward to Central failed to establish"
+    echo "Port-forward to Central failed to establish." > "${DUMP_DIR}/collection-error.txt"
+    kill "${PF_PID}" 2>/dev/null || true
+    rm -f "${PF_LOG}"
+    exit 0
+fi
+log_msg "Port-forward established on local port ${LOCAL_PORT} (PID: ${PF_PID})"
+
+# Keep the admin password off the curl command line (visible via ps / /proc):
+# write it to a temporary curl config (mode 600) and pass it via --config.
+CURL_CONFIG="$(mktemp)"
+chmod 600 "${CURL_CONFIG}"
+printf 'user = "admin:%s"\n' "${ADMIN_PASSWORD}" > "${CURL_CONFIG}"
+
+DUMP_ZIP="$(mktemp)"
+
+cleanup() {
+    kill "${PF_PID}" 2>/dev/null || true
+    wait "${PF_PID}" 2>/dev/null || true
+    rm -f "${CURL_CONFIG}" "${PF_LOG}" "${DUMP_ZIP}"
+}
+trap cleanup EXIT
+
+# ---------- Build the request (mirrors "roxctl central debug dump") ----------
+# roxctl sends /debug/dump?logs=<bool>, defaulting to logs=false. Central's local
+# logs are already collected elsewhere in this must-gather, so we keep the same
+# default and let DEBUG_DUMP_LOGS opt back in.
+DUMP_LOGS="${DEBUG_DUMP_LOGS:-false}"
+DUMP_URL="https://127.0.0.1:${LOCAL_PORT}/debug/dump?logs=${DUMP_LOGS}"
+
+# ---------- Download the dump ----------
+# -k is intentional: Central serves a self-signed cert on the localhost
+# port-forward, so CA/hostname verification does not apply.
+log_msg "Downloading debug dump from /debug/dump?logs=${DUMP_LOGS} (includes a 30s CPU profile)"
+HTTP_CODE=$(timeout "${DUMP_TIMEOUT}" \
+    curl -sSk -w '%{http_code}' -o "${DUMP_ZIP}" \
+    --config "${CURL_CONFIG}" \
+    "${DUMP_URL}" 2>/dev/null) || HTTP_CODE="000"
+
+if [[ "${HTTP_CODE}" != "200" ]]; then
+    log_msg "WARNING: Debug dump download failed (HTTP ${HTTP_CODE})"
+    {
+        echo "Failed to download debug dump from ${DUMP_URL}"
+        echo "HTTP status: ${HTTP_CODE}"
+        echo "(HTTP 000 indicates a timeout or transport-level failure)"
+    } > "${DUMP_DIR}/collection-error.txt"
+    exit 0
+fi
+
+# ---------- Extract into the dump folder ----------
+if ! unzip -tq "${DUMP_ZIP}" >/dev/null 2>&1; then
+    log_msg "WARNING: Downloaded debug dump is not a valid zip; keeping raw file"
+    cp "${DUMP_ZIP}" "${DUMP_DIR}/debug-dump.zip"
+    echo "Downloaded response was not a valid zip archive; saved as debug-dump.zip for inspection." \
+        > "${DUMP_DIR}/collection-error.txt"
+    exit 0
+fi
+
+if unzip -oq "${DUMP_ZIP}" -d "${DUMP_DIR}" 2>/dev/null; then
+    FILE_COUNT=$(find "${DUMP_DIR}" -type f ! -name 'collection-info.txt' | wc -l | tr -d ' ')
+    log_msg "Debug dump extracted into acs-debug-dump/ (${FILE_COUNT} files)"
+    {
+        echo "source-endpoint: /debug/dump?logs=${DUMP_LOGS}"
+        echo "equivalent-command: roxctl central debug dump$( [[ "${DUMP_LOGS}" == "true" ]] && echo ' --logs' )"
+        echo "central-namespace: ${CENTRAL_NS}"
+        echo "central-pod: ${CENTRAL_POD}"
+        echo "collected-at: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        echo "files-extracted: ${FILE_COUNT}"
+    } > "${DUMP_DIR}/collection-info.txt"
+else
+    log_msg "WARNING: Failed to extract debug dump; keeping raw zip"
+    cp "${DUMP_ZIP}" "${DUMP_DIR}/debug-dump.zip"
+    echo "Dump downloaded but extraction failed; saved as debug-dump.zip." \
+        > "${DUMP_DIR}/collection-error.txt"
+fi
+
+log_msg "--- gather_debug_dump: complete ---"
