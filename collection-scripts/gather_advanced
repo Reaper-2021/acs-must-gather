@@ -1,0 +1,70 @@
+#!/bin/bash
+
+# ACS Must-Gather - Advanced ACS Diagnostics (orchestrator)
+#
+# This is the "advanced" diagnostic layer. It sits ABOVE the basic,
+# officially-supported collection methods (the diagnostic bundle produced by
+# `roxctl central debug download-diagnostics` and the debug dump produced by
+# `roxctl central debug dump`, both already collected by acs-must-gather).
+#
+# Everything under this layer is written to advanced-acs-diagnostics/ and is
+# best-effort: each sub-collector is isolated, always exits 0, and never affects
+# the basic collection. New advanced collectors should be added here.
+#
+# The sub-collectors are:
+#   gather_advanced_secured_cluster - Central-INDEPENDENT secured-cluster data
+#                                     (Sensor/Collector/Admission-Controller),
+#                                     useful when Sensor<->Central is broken.
+#   gather_advanced_tls_certs       - X.509 expiry/subject report for RHACS
+#                                     service certs (public certs only).
+#   gather_advanced_forensics       - crash and upgrade forensics
+#                                     (previous-container logs, pod describe,
+#                                     sensor-upgrader, administration events).
+
+# shellcheck source=collection-scripts/common.sh
+source /usr/bin/common.sh
+
+log_msg "=== gather_advanced: advanced ACS diagnostics starting ==="
+
+ADVANCED_DIR="${MUST_GATHER_DIR}/advanced-acs-diagnostics"
+mkdir -p "${ADVANCED_DIR}"
+
+{
+    echo "advanced-acs-diagnostics"
+    echo "collected-at: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo
+    echo "This is the advanced diagnostic layer, collected in addition to the"
+    echo "officially-supported acs-diagnostic-bundle/ and acs-debug-dump/ folders."
+    echo "Each sub-folder is best-effort and independent:"
+    echo "  secured-cluster-local/  - Sensor/Collector/Admission data collected"
+    echo "                            directly, without requiring Central."
+    echo "  tls-certs/              - X.509 expiry report for RHACS service certs."
+    echo "  crash-upgrade-forensics/- previous-container logs, pod describe,"
+    echo "                            sensor-upgrader, and administration events."
+} > "${ADVANCED_DIR}/README.txt"
+
+PIDS=()
+
+if [[ "${GATHER_ADV_SECURED_CLUSTER:-true}" == "true" ]]; then
+    /usr/bin/gather_advanced_secured_cluster &
+    PIDS+=($!)
+    log_msg "Launched gather_advanced_secured_cluster (PID: ${PIDS[-1]})"
+fi
+
+if [[ "${GATHER_ADV_TLS_CERTS:-true}" == "true" ]]; then
+    /usr/bin/gather_advanced_tls_certs &
+    PIDS+=($!)
+    log_msg "Launched gather_advanced_tls_certs (PID: ${PIDS[-1]})"
+fi
+
+if [[ "${GATHER_ADV_FORENSICS:-true}" == "true" ]]; then
+    /usr/bin/gather_advanced_forensics &
+    PIDS+=($!)
+    log_msg "Launched gather_advanced_forensics (PID: ${PIDS[-1]})"
+fi
+
+for pid in "${PIDS[@]}"; do
+    wait "${pid}" || log_msg "WARNING: advanced sub-collector PID ${pid} exited non-zero"
+done
+
+log_msg "=== gather_advanced: advanced ACS diagnostics complete ==="

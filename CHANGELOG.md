@@ -13,15 +13,42 @@ clusters. It collects three complementary layers of data: **acs-must-gather**
 `roxctl central debug download-diagnostics` bundle), and **acs-debug-dump**
 (Central's `roxctl central debug dump`, including a 30-second CPU profile).
 
-## [NEXT RELEASE]
+## [1.3.0] - 2026-08-19
 
 ### Added Features
+
+- Advanced ACS diagnostics layer (`advanced-acs-diagnostics/`). A new best-effort
+  layer collected in addition to the officially-supported diagnostic bundle and
+  debug dump, targeting data those layers cannot provide. It is isolated — a
+  failure here never affects the rest of the must-gather — and can be turned off
+  with `GATHER_ADVANCED=false`. All future advanced collectors will land here.
+  It contains three independent collectors:
+  - **Secured-cluster local diagnostics** (`secured-cluster-local/`): Sensor,
+    Collector, and Admission Controller data collected directly from the pods
+    **without requiring Central or an admin login** — the data that is missing
+    when Sensor cannot reach Central. Includes Sensor pprof (heap/goroutine) and
+    its cluster-entities store, Prometheus `/metrics` from Sensor / Admission
+    Controller / Collector, the Collector probe/driver type and pod state, and a
+    connectivity/certificate summary grep'd from the Sensor log. Toggle with
+    `GATHER_ADV_SECURED_CLUSTER`.
+  - **TLS certificate expiry report** (`tls-certs/`): decodes only the public
+    certificate material from RHACS TLS secrets (private keys are never read) and
+    reports subject/issuer/validity, flagging certs that expire within 30 days.
+    This is invisible in a normal must-gather because `oc adm inspect` redacts
+    secrets. Requires `openssl` (now installed in the image). Toggle with
+    `GATHER_ADV_TLS_CERTS`.
+  - **Crash & upgrade forensics** (`crash-upgrade-forensics/`): previous-container
+    logs for restarted containers, `oc describe pod` output, the `sensor-upgrader`
+    deployment/logs/RBAC, and Central's Administration Events (best-effort).
+    Toggle with `GATHER_ADV_FORENSICS`.
 
 ### Removed Features
 
 ### Deprecated Features
 
 ### Technical Changes
+
+- The image now installs `openssl` (used by the TLS certificate expiry report).
 
 ## [1.2.0] - 2026-08-15
 

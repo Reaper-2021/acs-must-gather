@@ -1,0 +1,132 @@
+#!/bin/bash
+
+# ACS Must-Gather - Advanced: Crash & Upgrade Forensics
+#
+# Targeted artifacts that make crash and upgrade root-causes obvious and that a
+# plain `oc adm inspect` does not surface cleanly:
+#   - previous-container logs for any container that has restarted (crash cause)
+#   - `oc describe pod` output (OOMKilled / FailedScheduling / last state)
+#   - the sensor-upgrader deployment, its logs, and its upgrade RBAC
+#   - Central's Administration Events feed (best-effort; needs Central)
+
+# shellcheck source=collection-scripts/common.sh
+source /usr/bin/common.sh
+
+log_msg "--- gather_advanced_forensics: starting ---"
+
+OUT_DIR="${MUST_GATHER_DIR}/advanced-acs-diagnostics/crash-upgrade-forensics"
+mkdir -p "${OUT_DIR}"
+
+ADV_TIMEOUT="${ADV_FORENSICS_TIMEOUT:-${DIAG_TIMEOUT:-30}}"
+
+# Namespaces to scan: ACS workload namespaces plus the operator namespace.
+SCAN_NS="${ACS_NAMESPACES}"
+[[ -n "${OPERATOR_NS:-}" ]] && SCAN_NS="${SCAN_NS}"$'\n'"${OPERATOR_NS}"
+SCAN_NS="$(echo "${SCAN_NS}" | sort -u | grep -v '^$')"
+
+LOG_ARGS="$(get_log_collection_args)"
+
+while IFS= read -r ns; do
+    [[ -z "${ns}" ]] && continue
+    log_msg "Forensics for namespace ${ns}..."
+    ns_dir="${OUT_DIR}/${ns}"
+    mkdir -p "${ns_dir}"
+
+    # ---------- pod describe (human-readable last-state / scheduling) ----------
+    oc describe pods -n "${ns}" > "${ns_dir}/describe-pods.txt" 2>/dev/null || true
+
+    # ---------- previous-container logs for restarted containers ----------
+    # Emit "<pod> <container>" for each container whose restartCount > 0.
+    restarted=$(oc get pods -n "${ns}" -o json 2>/dev/null | jq -r '
+        .items[] | .metadata.name as $p
+        | (.status.containerStatuses // [])[]
+        | select(.restartCount > 0)
+        | "\($p) \(.name)"' 2>/dev/null)
+
+    if [[ -n "${restarted}" ]]; then
+        mkdir -p "${ns_dir}/previous-logs"
+        while IFS=' ' read -r pod container; do
+            [[ -z "${pod}" ]] && continue
+            # shellcheck disable=SC2086
+            timeout "${ADV_TIMEOUT}" \
+                oc logs -n "${ns}" "${pod}" -c "${container}" --previous ${LOG_ARGS} \
+                > "${ns_dir}/previous-logs/${pod}-${container}.log" 2>/dev/null \
+                || rm -f "${ns_dir}/previous-logs/${pod}-${container}.log"
+        done <<< "${restarted}"
+    fi
+
+    # ---------- sensor-upgrader (upgrade forensics) ----------
+    if resource_exists "deployment/sensor-upgrader" "${ns}"; then
+        oc describe deployment/sensor-upgrader -n "${ns}" \
+            > "${ns_dir}/sensor-upgrader-deployment.txt" 2>/dev/null || true
+        # shellcheck disable=SC2086
+        oc logs -n "${ns}" deployment/sensor-upgrader ${LOG_ARGS} \
+            > "${ns_dir}/sensor-upgrader.log" 2>/dev/null || true
+    fi
+    if resource_exists "serviceaccount/sensor-upgrader" "${ns}"; then
+        oc get serviceaccount/sensor-upgrader -n "${ns}" -o yaml \
+            > "${ns_dir}/sensor-upgrader-sa.yaml" 2>/dev/null || true
+    fi
+done <<< "${SCAN_NS}"
+
+# ---------- upgrade RBAC (cluster-scoped) ----------
+oc get clusterrolebindings -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | grep -iE 'upgrade-sensors' \
+    | while IFS= read -r crb; do
+        [[ -z "${crb}" ]] && continue
+        oc get clusterrolebinding "${crb}" -o yaml >> "${OUT_DIR}/upgrade-sensors-rbac.yaml" 2>/dev/null || true
+    done
+
+# ---------- Administration Events (best-effort; requires Central) ----------
+# The AdministrationEventService (/v1/administration/events) is where image
+# integration / scanner / notifier failures surface. Reached the same way as the
+# basic diagnostics: port-forward to Central and authenticate with the admin
+# password. Purely best-effort - failure just writes an .error file.
+CENTRAL_POD=""; CENTRAL_NS=""
+while IFS= read -r ns; do
+    [[ -z "${ns}" ]] && continue
+    pod=$(oc get pods -n "${ns}" -l app=central --field-selector=status.phase=Running \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+    if [[ -n "${pod}" ]]; then CENTRAL_POD="${pod}"; CENTRAL_NS="${ns}"; break; fi
+done <<< "${ACS_NAMESPACES}"
+
+if [[ -n "${CENTRAL_POD}" ]]; then
+    ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" central-htpasswd \
+        -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    [[ -z "${ADMIN_PASSWORD}" ]] && ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" stackrox-admin-password \
+        -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+
+    if [[ -n "${ADMIN_PASSWORD}" ]]; then
+        pf_log="$(mktemp)"; curl_cfg="$(mktemp)"; chmod 600 "${curl_cfg}"
+        printf 'user = "admin:%s"\n' "${ADMIN_PASSWORD}" > "${curl_cfg}"
+        oc port-forward -n "${CENTRAL_NS}" "${CENTRAL_POD}" ":8443" > "${pf_log}" 2>&1 &
+        pf_pid=$!
+        local_port=""; _i=0
+        while [[ ${_i} -lt 20 ]]; do
+            local_port=$(grep -oE 'Forwarding from 127\.0\.0\.1:[0-9]+' "${pf_log}" 2>/dev/null \
+                | grep -oE '[0-9]+$' | head -1)
+            [[ -n "${local_port}" ]] && break
+            kill -0 "${pf_pid}" 2>/dev/null || break
+            sleep 0.5; _i=$((_i+1))
+        done
+        if [[ -n "${local_port}" ]] && kill -0 "${pf_pid}" 2>/dev/null; then
+            timeout "${ADV_TIMEOUT}" curl -sSk --config "${curl_cfg}" \
+                "https://127.0.0.1:${local_port}/v1/administration/events" \
+                > "${OUT_DIR}/administration-events.json" 2>/dev/null \
+                || echo "failed to fetch /v1/administration/events" > "${OUT_DIR}/administration-events.json.error"
+        else
+            echo "port-forward to Central failed" > "${OUT_DIR}/administration-events.json.error"
+        fi
+        kill "${pf_pid}" 2>/dev/null || true
+        wait "${pf_pid}" 2>/dev/null || true
+        rm -f "${pf_log}" "${curl_cfg}"
+    else
+        echo "Central admin password unavailable; skipped administration events." \
+            > "${OUT_DIR}/administration-events.json.error"
+    fi
+else
+    echo "No running Central pod; administration events not collected." \
+        > "${OUT_DIR}/administration-events.json.error"
+fi
+
+log_msg "--- gather_advanced_forensics: complete ---"
