@@ -95,6 +95,33 @@ authenticates with the admin password from the `central-htpasswd` secret
 (falling back to `stackrox-admin-password`) over an `oc port-forward`, since
 Central container images do not ship `curl`.
 
+### Advanced ACS Diagnostics
+
+Extracted into the `advanced-acs-diagnostics/` folder. This is an **advanced
+layer collected in addition to** the officially-supported diagnostic bundle and
+debug dump above. It targets data those layers cannot provide — most importantly
+data that does **not** depend on Central being reachable. Each sub-collector is
+best-effort and isolated; a failure in this layer never affects the rest of the
+must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
+
+- **`secured-cluster-local/`** — Sensor, Collector, and Admission Controller data
+  collected **directly from the pods, without requiring Central or an admin
+  login** — exactly what is missing when Sensor cannot reach Central. Includes
+  Sensor's pprof heap/goroutine dumps and its cluster-entities store, Prometheus
+  `/metrics` from Sensor / Admission Controller / Collector, the Collector
+  probe/driver type (`COLLECTION_METHOD`) and pod state, and a grep'd
+  connectivity/certificate summary from the Sensor log. Reached over
+  `oc port-forward`, which can also read the loopback-only debug servers.
+- **`tls-certs/`** — an X.509 expiry report (`cert-expiry-summary.txt`) for the
+  RHACS service certificates. `oc adm inspect` redacts secrets, so expired or
+  mismatched certs are otherwise invisible. **Only public certificate material
+  is read** (private keys are never decoded), and certs expiring within 30 days
+  are flagged.
+- **`crash-upgrade-forensics/`** — previous-container logs for restarted
+  containers, `oc describe pod` output (OOMKilled / FailedScheduling), the
+  `sensor-upgrader` deployment / logs / RBAC, and Central's Administration Events
+  feed (best-effort; needs Central).
+
 ## Environment Variables
 
 | Variable | Description | Default |
@@ -114,6 +141,12 @@ Central container images do not ship `curl`.
 | `GATHER_DEBUG_DUMP` | Enable Central debug dump collection | `true` |
 | `DEBUG_DUMP_TIMEOUT` | Timeout for the debug dump download (seconds) | `300` |
 | `DEBUG_DUMP_LOGS` | Include Central logs in the dump (`roxctl central debug dump --logs`) | `false` |
+| `GATHER_ADVANCED` | Enable the advanced ACS diagnostics layer | `true` |
+| `GATHER_ADV_SECURED_CLUSTER` | Enable Central-independent secured-cluster collection | `true` |
+| `GATHER_ADV_TLS_CERTS` | Enable the TLS certificate expiry report | `true` |
+| `GATHER_ADV_FORENSICS` | Enable crash & upgrade forensics collection | `true` |
+| `ADV_SC_TIMEOUT` | Timeout per secured-cluster endpoint call (seconds) | `DIAG_TIMEOUT` (`30`) |
+| `ADV_FORENSICS_TIMEOUT` | Timeout per forensics call (seconds) | `DIAG_TIMEOUT` (`30`) |
 
 ## Building
 

@@ -85,6 +85,14 @@ if [[ "${GATHER_DEBUG_DUMP:-true}" == "true" ]] && [[ -n "${ACS_NAMESPACES}" ]];
     log_msg "Launched gather_debug_dump (PID: ${PIDS[-1]})"
 fi
 
+# Advanced ACS diagnostics layer (see gather_advanced). Best-effort and isolated;
+# collected in addition to the officially-supported bundle/dump layers above.
+if [[ "${GATHER_ADVANCED:-true}" == "true" ]] && [[ -n "${ACS_NAMESPACES}" ]]; then
+    /usr/bin/gather_advanced &
+    PIDS+=($!)
+    log_msg "Launched gather_advanced (PID: ${PIDS[-1]})"
+fi
+
 # ---------- Wait for all sub-gatherers ----------
 if [[ ${#PIDS[@]} -gt 0 ]]; then
     log_msg "Waiting on ${#PIDS[@]} sub-gatherers..."
