@@ -13,7 +13,7 @@ clusters. It collects three complementary layers of data: **acs-must-gather**
 `roxctl central debug download-diagnostics` bundle), and **acs-debug-dump**
 (Central's `roxctl central debug dump`, including a 30-second CPU profile).
 
-## [NEXT RELEASE]
+## [1.3.0] - 2026-08-19
 
 ### Added Features
 
