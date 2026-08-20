@@ -165,8 +165,10 @@ It reports Central version / license, Central-DB availability, connected
 clusters (collection method + version skew), and — when the advanced layer is
 present — collection errors, Sensor↔Central connectivity, TLS-cert expiry,
 Sensor/Central heap and goroutine counts, Collector status, admin events, and
-OOMKilled / restarting pods. Each check is `OK` / `WARN` / `FAIL` / `SKIP`; the
-process exits non-zero if any check `FAIL`s, so it is CI/scripting friendly.
+OOMKilled / restarting pods. The heap check reads each component's pod memory
+limit from its manifest and warns on the real percentage used (`WARN` ≥75%,
+`FAIL` ≥90%). Each check is `OK` / `WARN` / `FAIL` / `SKIP`; the process exits
+non-zero if any check `FAIL`s, so it is CI/scripting friendly.
 
 Requires `python3` (stdlib only). The heap checks use `go tool pprof` when `go`
 is installed; without it they `SKIP`.

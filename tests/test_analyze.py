@@ -12,10 +12,22 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import types
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ANALYZER = os.path.join(HERE, "..", "analysis", "acs-analyze")
+
+
+def load_module():
+    """Load the extension-less acs-analyze script as a module for unit tests."""
+    src = open(ANALYZER, encoding="utf-8").read()
+    mod = types.ModuleType("acs_analyze")
+    exec(compile(src, ANALYZER, "exec"), mod.__dict__)
+    return mod
+
+
+ACS = load_module()
 
 
 def _write(path, content):
@@ -104,6 +116,47 @@ class AnalyzeTest(unittest.TestCase):
             build_bundle(nested, healthy=True)
             code, out = run(d)  # point at the parent, not the image dir
             self.assertEqual(code, 0, out)
+
+
+class MemParsingTest(unittest.TestCase):
+    def test_mem_to_bytes(self):
+        self.assertEqual(ACS.mem_to_bytes("512Mi"), 512 * 1024**2)
+        self.assertEqual(ACS.mem_to_bytes("4Gi"), 4 * 1024**3)
+        self.assertEqual(ACS.mem_to_bytes("1000Mi"), 1000 * 1024**2)
+        self.assertEqual(ACS.mem_to_bytes("2000000"), 2000000)
+        self.assertEqual(ACS.mem_to_bytes("1G"), 1000**3)
+        self.assertIsNone(ACS.mem_to_bytes("not-a-quantity"))
+
+    def test_container_mem_limit_sorted_yaml(self):
+        # Mirrors `oc get -o yaml` output: keys alphabetical, so the list item
+        # starts with `- command:` and `name:`/`resources:` are plain keys.
+        manifest = textwrap.dedent("""\
+            spec:
+              containers:
+              - command:
+                - /entrypoint.sh
+                env:
+                - name: ROX_MEMLIMIT
+                  value: "1Gi"
+                image: example/central
+                name: central
+                resources:
+                  limits:
+                    cpu: 500m
+                    memory: 1000Mi
+                  requests:
+                    cpu: 200m
+                    memory: 200Mi
+              - name: central-db
+                resources:
+                  limits:
+                    memory: 4Gi
+            """)
+        self.assertEqual(ACS.container_mem_limit(manifest, "central"),
+                         1000 * 1024**2)
+        self.assertEqual(ACS.container_mem_limit(manifest, "central-db"),
+                         4 * 1024**3)
+        self.assertIsNone(ACS.container_mem_limit(manifest, "nope"))
 
 
 if __name__ == "__main__":

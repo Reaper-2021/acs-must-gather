@@ -162,6 +162,119 @@ def human_bytes(n):
     return f"{n:.1f}PB"
 
 
+# Kubernetes quantity suffixes -> multiplier (binary Ki/Mi/... and decimal k/M/...).
+_QTY = {
+    "": 1, "k": 1000, "K": 1000, "M": 1000**2, "G": 1000**3,
+    "T": 1000**4, "P": 1000**5,
+    "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4, "Pi": 1024**5,
+}
+
+
+def mem_to_bytes(s):
+    """Convert a Kubernetes memory quantity (e.g. '4Gi', '512Mi', '2000000') to bytes."""
+    m = re.match(r'^\s*"?(\d+(?:\.\d+)?)\s*([EPTGMK]i?|[kKMGTP]?)"?\s*$', str(s))
+    if not m:
+        return None
+    val, suffix = float(m.group(1)), m.group(2)
+    mult = _QTY.get(suffix)
+    return int(val * mult) if mult else None
+
+
+def container_mem_limit(yaml_text, container):
+    """Best-effort: memory limit (bytes) for the named container in a pod manifest.
+
+    Stdlib only, so this is an indentation-aware scan rather than a real YAML
+    parse. `oc get -o yaml` sorts keys alphabetically, so a container list item
+    starts with `- <firstkey>:` (e.g. `- command:`) and carries `name:` as a
+    plain key. We split the `containers:` list into per-item blocks, pick the
+    block whose `name:` matches, then read its `limits:`/`memory:`.
+    """
+    lines = yaml_text.splitlines()
+    n = len(lines)
+
+    # Locate the spec-level `containers:` key.
+    cidx = cindent = None
+    for i, ln in enumerate(lines):
+        m = re.match(r'^(\s*)containers:\s*$', ln)
+        if m:
+            cidx, cindent = i, len(m.group(1))
+            break
+    if cidx is None:
+        return None
+
+    # Determine the list-item ("- ") indent from the first item after the key.
+    dash = None
+    for ln in lines[cidx + 1:]:
+        if not ln.strip():
+            continue
+        m = re.match(r'^(\s*)-\s', ln)
+        if m and len(m.group(1)) >= cindent:
+            dash = len(m.group(1))
+        break
+    if dash is None:
+        return None
+
+    # Split the list into per-item blocks.
+    blocks, cur = [], None
+    for ln in lines[cidx + 1:]:
+        if not ln.strip():
+            if cur is not None:
+                cur.append(ln)
+            continue
+        ind = len(ln) - len(ln.lstrip())
+        if ind == dash and re.match(r'^\s*-\s', ln):
+            if cur is not None:
+                blocks.append(cur)
+            cur = [ln]
+        elif ind > dash:
+            if cur is not None:
+                cur.append(ln)
+        else:
+            break  # dedented out of the containers list
+    if cur is not None:
+        blocks.append(cur)
+
+    for blk in blocks:
+        joined = "\n".join(blk)
+        # `name:` is usually a plain key, but may sit on the `- ` item line when
+        # it is the alphabetically-first key of the container.
+        if not re.search(rf'(?m)^\s*(?:-\s+)?name:\s*"?{re.escape(container)}"?\s*$',
+                         joined):
+            continue
+        in_limits = False
+        for bl in blk:
+            s = bl.strip()
+            if s.startswith("limits:"):
+                in_limits = True
+                continue
+            if s.startswith("requests:"):
+                in_limits = False
+                continue
+            if in_limits:
+                mm = re.match(r'^memory:\s*(.+)$', s)
+                if mm:
+                    return mem_to_bytes(mm.group(1))
+    return None
+
+
+def pod_mem_limit(bundle, ns, name_glob, container, exclude=()):
+    """Find a pod matching name_glob under namespaces/<ns>/ and return its
+    container memory limit in bytes, or None."""
+    base = os.path.join(bundle, "namespaces", ns if ns else "*", "pods",
+                        name_glob, "*.yaml")
+    for yml in sorted(glob.glob(base)):
+        d = os.path.basename(os.path.dirname(yml))
+        if any(d.startswith(x) for x in exclude):
+            continue
+        txt = read_text(yml)
+        if not txt:
+            continue
+        lim = container_mem_limit(txt, container)
+        if lim:
+            return lim
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
@@ -361,10 +474,15 @@ def check_heap(adv, bundle, rep):
         os.path.join(bundle, "acs-diagnostics", "central-heap-profile.pb.gz"),
         os.path.join(bundle, "acs-diagnostic-bundle", "heap.pb.gz"),
     )
-    targets = [(f"sensor heap [{os.path.basename(os.path.dirname(p))}]", p)
-               for p in sensor_heaps]
+    # Each target: (label, path, ns, name_glob, container, exclude) so we can
+    # look up the owning pod's memory limit and warn on the real percentage.
+    targets = []
+    for p in sensor_heaps:
+        ns = os.path.basename(os.path.dirname(p))
+        targets.append((f"sensor heap [{ns}]", p, ns, "sensor-*", "sensor", ()))
     if central_heap:
-        targets.append(("central heap", central_heap))
+        targets.append(("central heap", central_heap, None, "central-*",
+                        "central", ("central-db",)))
     if not targets:
         rep.add("Heap profiles", SKIP, "no heap profiles found")
         return
@@ -373,14 +491,28 @@ def check_heap(adv, bundle, rep):
                 f"{len(targets)} heap profile(s) present but `go` not installed "
                 "(install Go to read them)")
         return
-    for label, path in targets:
+    for label, path, ns, name_glob, container, exclude in targets:
         total = _pprof_total_bytes(path)
         if total is None:
             rep.add(label, SKIP, "could not parse pprof output")
             continue
-        # We cannot know the pod memory limit offline; report and warn only if huge.
-        status = WARN if total > 2 * 1024**3 else INFO
-        rep.add(label, status, f"live heap {human_bytes(total)}")
+        limit = pod_mem_limit(bundle, ns, name_glob, container, exclude)
+        if limit:
+            pct = total / limit
+            if pct >= 0.90:
+                status = FAIL
+            elif pct >= 0.75:
+                status = WARN
+            else:
+                status = OK
+            rep.add(label, status,
+                    f"live heap {human_bytes(total)} of {human_bytes(limit)} "
+                    f"limit ({pct:.0%})")
+        else:
+            # No limit in the manifest: report, warn only if very large.
+            status = WARN if total > 2 * 1024**3 else INFO
+            rep.add(label, status,
+                    f"live heap {human_bytes(total)} (no pod memory limit found)")
 
 
 def check_goroutines(adv, bundle, rep):
