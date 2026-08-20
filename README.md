@@ -186,8 +186,10 @@ find "$ADV" -name '*.error'          # expect: no output
 ```
 
 A `.error` file is not fatal — each collector is best-effort — but it tells you
-which endpoint was unreachable (often itself a finding: e.g. a Sensor `.error`
-for every port means the Sensor pod was not actually running).
+what was unreachable (often itself a finding). Note the two shapes: a single
+`sensor.error` means no running Sensor pod was found at all, whereas per-endpoint
+files like `sensor-heap.pb.gz.error` mean the pod is up but that debug/metrics
+server did not answer.
 
 A `sensor-clusterentities-state.json.skipped` file is **normal** — that store is
 only served when Sensor runs with `ROX_DEBUG_CLUSTER_ENTITIES_STORE=true`.
@@ -320,11 +322,13 @@ grep -oE '[0-9]+ minutes' "$ADV/secured-cluster-local/stackrox/sensor-goroutine.
 **What they store:** a one-shot scrape of each component's Prometheus `/metrics`
 endpoint (plain text, `# HELP` / `# TYPE` / `metric{labels} value`).
 
-**Step 3a — is Sensor actually talking to Central?** These counters should be
-non-zero and, across two snapshots, **increasing**:
+**Step 3a — is Sensor actually talking to Central?** Look at Sensor's own
+counters and its gRPC client totals; these should be non-zero and, across two
+snapshots, **increasing**. Exact metric names vary by version, so grep broadly
+rather than for a fixed name:
 
 ```sh
-grep -E '^rox_sensor_(events|central_.*grpc|messages)' "$ADV/secured-cluster-local/stackrox/sensor-metrics.txt" | head
+grep -iE '^rox_sensor_|grpc' "$ADV/secured-cluster-local/stackrox/sensor-metrics.txt" | head -30
 ```
 
 **Step 3b — Go runtime health (leak corroboration):**
@@ -450,8 +454,10 @@ jq -r '.events[] | "\(.level)  \(.type)  \(.hint // .message)"' \
   "$ADV/crash-upgrade-forensics/administration-events.json"
 ```
 
-**Step 7d — upgrade problems:** if a Sensor upgrade is stuck, look for the
-`sensor-upgrader-*.log` and `upgrade-sensors-rbac.yaml` files; their absence
+**Step 7d — upgrade problems:** if a Sensor upgrade is stuck, look at the
+per-namespace `sensor-upgrader.log` / `sensor-upgrader-deployment.txt` /
+`sensor-upgrader-sa.yaml` under `crash-upgrade-forensics/<ns>/`, plus the
+cluster-scoped `crash-upgrade-forensics/upgrade-sensors-rbac.yaml`; their absence
 simply means no upgrade was in progress.
 
 ---
