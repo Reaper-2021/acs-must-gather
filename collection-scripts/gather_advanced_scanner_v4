@@ -1,0 +1,104 @@
+#!/bin/bash
+
+# ACS Must-Gather - Advanced: Scanner V4 Health
+#
+# Central-independent triage of Scanner V4 (indexer, matcher, and its database).
+# Scanner V4 problems - stuck vulnerability updates, an indexer/matcher that
+# never becomes ready, or a crash-looping DB - are hard to see from the officially
+# supported bundle, which focuses on Central. This collector reads Scanner V4
+# state directly from the pods:
+#   - pod readiness / restart / OOM state (cheap, no port-forward)
+#   - each component's /health/readiness (HTTPS 9443, server-TLS)
+#   - Prometheus /metrics (monitoring-tls 9091; best-effort - may require a
+#     client cert when secure metrics are enabled, in which case an .error is
+#     written and the rest of the collection is unaffected)
+#   - vulnerability-updater / definitions markers grep'd from the component logs
+#   - `oc describe` for the indexer / matcher / db deployments (events, images)
+
+# shellcheck source=collection-scripts/common.sh
+source /usr/bin/common.sh
+
+log_msg "--- gather_advanced_scanner_v4: starting ---"
+
+OUT_DIR="${MUST_GATHER_DIR}/advanced-acs-diagnostics/scanner-v4"
+mkdir -p "${OUT_DIR}"
+
+# collect_via_pf (common.sh) reads PF_TIMEOUT for each fetch.
+PF_TIMEOUT="${ADV_SCANNER_V4_TIMEOUT:-${DIAG_TIMEOUT:-30}}"
+
+LOG_ARGS="$(get_log_collection_args)"
+
+# Log markers that indicate vulnerability-update / definitions activity or trouble.
+VULN_MARKERS='vulnerabilit|updater|definitions|bundle|manifest|load.*vuln|export.*complet|out of date|stale|no such|failed to (load|fetch|update)'
+
+while IFS= read -r ns; do
+    [[ -z "${ns}" ]] && continue
+
+    # Only proceed when Scanner V4 is actually deployed in this namespace.
+    if ! resource_exists "deployment/scanner-v4-indexer" "${ns}" \
+        && ! resource_exists "deployment/scanner-v4-matcher" "${ns}"; then
+        continue
+    fi
+
+    log_msg "Collecting Scanner V4 diagnostics in ${ns}..."
+    ns_dir="${OUT_DIR}/${ns}"
+    mkdir -p "${ns_dir}"
+
+    # ---------- pod status table (no port-forward) ----------
+    {
+        echo "# Scanner V4 pod status"
+        echo "# namespace: ${ns}   generated: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        echo
+        oc get pods -n "${ns}" -l app.kubernetes.io/component=scanner-v4 -o json 2>/dev/null \
+            | jq -r '.items[]
+                | .metadata.name as $n
+                | (.metadata.labels.app // "?") as $app
+                | "=== \($n)  [\($app)] ==="
+                , "  phase: " + (.status.phase // "?")
+                , "  ready: " + (([.status.containerStatuses[]? | .ready] | all) | tostring)
+                , "  restarts: " + (([.status.containerStatuses[]? | .restartCount] | add) // 0 | tostring)
+                , "  lastState: " + ([.status.containerStatuses[]? | .lastState | keys[]?] | join(","))
+                , "  image: " + ([.spec.containers[]? | .image] | join(", "))' \
+            || echo "(failed to read Scanner V4 pods)"
+    } > "${ns_dir}/scanner-v4-status.txt" 2>/dev/null || true
+
+    # ---------- per-component readiness + metrics + log summary ----------
+    for comp in scanner-v4-indexer scanner-v4-matcher; do
+        pod=$(oc get pods -n "${ns}" -l "app=${comp}" \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+        [[ -z "${pod}" ]] && continue
+        log_msg "  ${comp} pod: ${pod}"
+
+        # Readiness endpoint (HTTPS 9443, server-TLS - no client cert needed).
+        collect_via_pf "${ns}" "${pod}" 9443 "/health/readiness" \
+            "${ns_dir}/${comp}-readiness.txt" https -k
+
+        # Prometheus metrics (monitoring-tls 9091; best-effort).
+        collect_via_pf "${ns}" "${pod}" 9091 "/metrics" \
+            "${ns_dir}/${comp}-metrics.txt" https -k
+
+        # Vulnerability-updater / definitions markers from the component log.
+        {
+            echo "# ${comp} vulnerability-updater / definitions markers"
+            echo "# namespace: ${ns}  pod: ${pod}"
+            echo "# generated: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo
+            # shellcheck disable=SC2086
+            oc logs -n "${ns}" "${pod}" --tail=-1 ${LOG_ARGS} 2>/dev/null \
+                | grep -niE "${VULN_MARKERS}" | tail -100 \
+                || echo "(no vulnerability/updater markers found)"
+        } > "${ns_dir}/${comp}-vuln-summary.txt" 2>/dev/null || true
+    done
+
+    # ---------- deployment describe (events, images, replicas) ----------
+    for dep in scanner-v4-indexer scanner-v4-matcher scanner-v4-db; do
+        if resource_exists "deployment/${dep}" "${ns}"; then
+            oc describe "deployment/${dep}" -n "${ns}" \
+                > "${ns_dir}/${dep}-deployment.txt" 2>/dev/null || true
+        fi
+    done
+
+done <<< "${ACS_NAMESPACES}"
+
+log_msg "--- gather_advanced_scanner_v4: complete ---"

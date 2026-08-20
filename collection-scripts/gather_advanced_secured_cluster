@@ -22,49 +22,9 @@ log_msg "--- gather_advanced_secured_cluster: starting ---"
 OUT_DIR="${MUST_GATHER_DIR}/advanced-acs-diagnostics/secured-cluster-local"
 mkdir -p "${OUT_DIR}"
 
-ADV_TIMEOUT="${ADV_SC_TIMEOUT:-${DIAG_TIMEOUT:-30}}"
-
-# collect_via_pf <ns> <pod> <remote_port> <path> <outfile>
-# Opens a short-lived port-forward to <pod>:<remote_port>, curls <path> over
-# plain HTTP, writes the body to <outfile>, and always tears the tunnel down.
-collect_via_pf() {
-    local ns="$1" pod="$2" remote_port="$3" path="$4" outfile="$5"
-
-    local pf_log local_port pf_pid
-    pf_log="$(mktemp)"
-    oc port-forward -n "${ns}" "${pod}" ":${remote_port}" > "${pf_log}" 2>&1 &
-    pf_pid=$!
-
-    local_port=""
-    local _
-    for _ in $(seq 1 20); do
-        local_port=$(grep -oE 'Forwarding from 127\.0\.0\.1:[0-9]+' "${pf_log}" 2>/dev/null \
-            | grep -oE '[0-9]+$' | head -1)
-        [[ -n "${local_port}" ]] && break
-        kill -0 "${pf_pid}" 2>/dev/null || break
-        sleep 0.5
-    done
-
-    if [[ -z "${local_port}" ]] || ! kill -0 "${pf_pid}" 2>/dev/null; then
-        log_msg "  WARNING: port-forward to ${pod}:${remote_port} failed"
-        echo "port-forward to ${pod}:${remote_port} failed" > "${outfile}.error"
-        kill "${pf_pid}" 2>/dev/null || true
-        wait "${pf_pid}" 2>/dev/null || true
-        rm -f "${pf_log}"
-        return 0
-    fi
-
-    if ! timeout "${ADV_TIMEOUT}" \
-        curl -sSf "http://127.0.0.1:${local_port}${path}" -o "${outfile}" 2>/dev/null; then
-        log_msg "  WARNING: fetch failed: ${pod}:${remote_port}${path}"
-        echo "fetch failed: ${pod}:${remote_port}${path}" > "${outfile}.error"
-        rm -f "${outfile}" 2>/dev/null || true
-    fi
-
-    kill "${pf_pid}" 2>/dev/null || true
-    wait "${pf_pid}" 2>/dev/null || true
-    rm -f "${pf_log}"
-}
+# Sensor's debug and metrics servers are plain HTTP; collect_via_pf (from
+# common.sh) defaults to the http scheme, so the calls below need no scheme arg.
+PF_TIMEOUT="${ADV_SC_TIMEOUT:-${DIAG_TIMEOUT:-30}}"
 
 # Stable Sensor log markers that indicate connectivity / certificate state.
 # (These lines are asserted by StackRox tests, so they are safe to grep for.)

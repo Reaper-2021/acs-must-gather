@@ -590,6 +590,38 @@ def check_admin_events(adv, rep):
         rep.add("Admin events", OK, detail)
 
 
+def check_scanner_v4(adv, rep):
+    if not adv:
+        return
+    statuses = glob.glob(os.path.join(adv, "scanner-v4", "*",
+                                      "scanner-v4-status.txt"))
+    if not statuses:
+        return  # Scanner V4 not deployed or not collected - stay quiet.
+    for path in statuses:
+        ns = os.path.basename(os.path.dirname(path))
+        txt = read_text(path) or ""
+        not_ready, max_restart = [], 0
+        for block in re.split(r"(?m)^=== ", txt):
+            block = block.strip()
+            if not block or block.startswith("#"):
+                continue
+            name = block.splitlines()[0].split("[")[0].replace("===", "").strip()
+            rc = re.search(r"restarts:\s*(\d+)", block)
+            if rc:
+                max_restart = max(max_restart, int(rc.group(1)))
+            ready = re.search(r"ready:\s*(\w+)", block)
+            if ready and ready.group(1).lower() == "false":
+                not_ready.append(name)
+        detail = f"max restarts={max_restart}"
+        if not_ready:
+            rep.add(f"Scanner V4 [{ns}]", WARN,
+                    f"{len(not_ready)} pod(s) not ready", not_ready[:12])
+        elif max_restart > 5:
+            rep.add(f"Scanner V4 [{ns}]", WARN, detail + " - restart churn")
+        else:
+            rep.add(f"Scanner V4 [{ns}]", OK, detail)
+
+
 def check_crashes(adv, bundle, rep):
     """OOMKilled / restart churn, from the advanced describe or pod manifests."""
     # Preferred: advanced-layer describe-pods.txt (human readable last-state).
@@ -710,6 +742,7 @@ def main(argv=None):
     check_heap(adv, bundle, rep)
     check_goroutines(adv, bundle, rep)
     check_collector(adv, rep)
+    check_scanner_v4(adv, rep)
     check_admin_events(adv, rep)
     check_crashes(adv, bundle, rep)
 

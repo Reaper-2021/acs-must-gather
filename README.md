@@ -121,6 +121,15 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
   containers, `oc describe pod` output (OOMKilled / FailedScheduling), the
   `sensor-upgrader` deployment / logs / RBAC, and Central's Administration Events
   feed (best-effort; needs Central).
+- **`scanner-v4/`** — **Central-independent** Scanner V4 triage, collected
+  directly from the indexer / matcher / db pods. Includes a pod-status table
+  (phase / ready / restarts / last-state / image), each component's
+  `/health/readiness` (HTTPS 9443) and Prometheus `/metrics` (9091, best-effort —
+  secure metrics may need a client cert, in which case an `.error` is written),
+  vulnerability-updater / definitions markers grep'd from the component logs, and
+  `oc describe` for the indexer / matcher / db deployments. Surfaces stuck
+  vulnerability updates and never-ready or crash-looping Scanner V4 components
+  that the Central-focused bundle misses. Reached over `oc port-forward`.
 
 ## Environment Variables
 
@@ -145,8 +154,10 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
 | `GATHER_ADV_SECURED_CLUSTER` | Enable Central-independent secured-cluster collection | `true` |
 | `GATHER_ADV_TLS_CERTS` | Enable the TLS certificate expiry report | `true` |
 | `GATHER_ADV_FORENSICS` | Enable crash & upgrade forensics collection | `true` |
+| `GATHER_ADV_SCANNER_V4` | Enable Central-independent Scanner V4 health collection | `true` |
 | `ADV_SC_TIMEOUT` | Timeout per secured-cluster endpoint call (seconds) | `DIAG_TIMEOUT` (`30`) |
 | `ADV_FORENSICS_TIMEOUT` | Timeout per forensics call (seconds) | `DIAG_TIMEOUT` (`30`) |
+| `ADV_SCANNER_V4_TIMEOUT` | Timeout per Scanner V4 endpoint call (seconds) | `DIAG_TIMEOUT` (`30`) |
 
 ## Analyzing a bundle
 
@@ -164,8 +175,8 @@ make analyze BUNDLE=path/to/must-gather.local.XXXX
 It reports Central version / license, Central-DB availability, connected
 clusters (collection method + version skew), and — when the advanced layer is
 present — collection errors, Sensor↔Central connectivity, TLS-cert expiry,
-Sensor/Central heap and goroutine counts, Collector status, admin events, and
-OOMKilled / restarting pods. The heap check reads each component's pod memory
+Sensor/Central heap and goroutine counts, Collector status, Scanner V4
+readiness / restart churn, admin events, and OOMKilled / restarting pods. The heap check reads each component's pod memory
 limit from its manifest and warns on the real percentage used (`WARN` ≥75%,
 `FAIL` ≥90%). Each check is `OK` / `WARN` / `FAIL` / `SKIP`; the process exits
 non-zero if any check `FAIL`s, so it is CI/scripting friendly.
