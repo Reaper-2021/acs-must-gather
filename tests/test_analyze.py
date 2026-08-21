@@ -276,6 +276,46 @@ class ImageCveTest(unittest.TestCase):
             # Only suppressed CVE present -> no fixable critical -> INFO.
             self.assertEqual(rep.results[0].status, ACS.INFO)
 
+    def test_shared_image_counted_once(self):
+        # Same image backs two deployments -> its CVEs must be counted once, not
+        # doubled. (Regression: earlier the summary multiplied by deployments.)
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            self._write_export(adv, [
+                _workload_line("ns1", "app1", "quay.io/x/shared:1",
+                               [_vuln("CVE-A", "CRITICAL_VULNERABILITY_SEVERITY", "1.1")]),
+                _workload_line("ns2", "app2", "quay.io/x/shared:1",
+                               [_vuln("CVE-A", "CRITICAL_VULNERABILITY_SEVERITY", "1.1")]),
+            ])
+            rep = ACS.Report()
+            ACS.check_image_cves(adv, rep)
+            r = rep.results[0]
+            # One image, one fixable-critical CVE (not two).
+            self.assertIn("1/1 image(s)", r.detail)
+            self.assertTrue(any("1 CVEs (1 fixable, 1 fix-crit" in ln
+                                for ln in r.lines), r.lines)
+
+    def test_same_cve_across_components_counted_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            _write(os.path.join(adv, "vuln-report", "vuln-mgmt-workloads.json"),
+                   json.dumps({"result": {
+                       "deployment": {"namespace": "ns", "name": "app"},
+                       "images": [{
+                           "name": {"fullName": "quay.io/x/img:1"},
+                           "scan": {"components": [
+                               {"name": "libc", "vulns": [
+                                   _vuln("CVE-DUP", "CRITICAL_VULNERABILITY_SEVERITY", "1.1")]},
+                               {"name": "libssl", "vulns": [
+                                   _vuln("CVE-DUP", "CRITICAL_VULNERABILITY_SEVERITY", "1.1")]},
+                           ]},
+                       }],
+                   }}) + "\n")
+            rep = ACS.Report()
+            ACS.check_image_cves(adv, rep)
+            self.assertTrue(any("1 CVEs" in ln for ln in rep.results[0].lines),
+                            rep.results[0].lines)
+
     def test_image_filter_drilldown(self):
         with tempfile.TemporaryDirectory() as d:
             adv = os.path.join(d, "advanced-acs-diagnostics")

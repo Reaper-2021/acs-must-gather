@@ -712,21 +712,27 @@ def check_image_cves(adv, rep, image_filter=None):
     if not os.path.exists(path):
         return  # collector didn't run / no data - stay quiet.
 
-    # Aggregate per unique image (an image can back many deployments).
-    images = {}  # full_name -> {total, fixable, sev:{...}, fixable_crit_imp, deps:set}
-    for dep, img in _iter_workloads(path):
+    # Aggregate per unique image. An image commonly backs many deployments, so
+    # count each image's CVEs exactly once (keyed by full name); within an image,
+    # a CVE can appear in several components, so dedupe by CVE too. This keeps the
+    # summary consistent with the --image drill-down.
+    images = {}  # full_name -> {total, fixable, crit, imp, fix_crit, fix_imp}
+    for _dep, img in _iter_workloads(path):
         fn = _image_full_name(img)
-        agg = images.setdefault(fn, {
+        if fn in images:
+            continue
+        agg = images[fn] = {
             "total": 0, "fixable": 0, "crit": 0, "imp": 0,
-            "fix_crit": 0, "fix_imp": 0, "deps": set(),
-        })
-        dep_name = _g(dep, "name")
-        dep_ns = _g(dep, "namespace")
-        if dep_name:
-            agg["deps"].add(f"{dep_ns}/{dep_name}" if dep_ns else dep_name)
+            "fix_crit": 0, "fix_imp": 0,
+        }
+        seen = set()
         for _comp, vuln in _image_vulns(img):
             if _g(vuln, "suppressed"):
                 continue  # snoozed CVE - not actionable
+            cve = _g(vuln, "cve")
+            if cve in seen:
+                continue  # same CVE across components - count once per image
+            seen.add(cve)
             sev = _SEV_SHORT.get(_g(vuln, "severity") or "", "UNKNOWN")
             fixable = _vuln_is_fixable(vuln)
             agg["total"] += 1
