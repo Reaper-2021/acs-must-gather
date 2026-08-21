@@ -28,7 +28,30 @@ ADV_TIMEOUT="${ADV_PLATFORM_TIMEOUT:-${DIAG_TIMEOUT:-30}}"
 LOG_ARGS="$(get_log_collection_args)"
 
 # Postgres migration / lock / slow-upgrade markers for the central-db log.
-DB_MARKERS='migrat|lock|deadlock|timeout|slow|panic|FATAL|could not|out of memory|restore|upgrade|vacuum|checkpoint'
+# Deliberately excludes routine background activity (checkpoint / vacuum) so the
+# file carries signal, not noise.
+DB_MARKERS='migrat|deadlock|lock wait|lock timeout|lock is not available|canceling statement|timeout|slow|panic|FATAL|could not|out of memory|restore|rollback|upgrade'
+
+# collect_init_logs <ns> <resource> <out_prefix>
+# Collect current + previous logs for every init container of <resource>. The
+# init container name and location vary by version (e.g. init-db on central-db),
+# so discover them rather than hardcoding. Empty logs are removed.
+collect_init_logs() {
+    local ns="$1" res="$2" prefix="$3" names c
+    names=$(oc get "${res}" -n "${ns}" \
+        -o jsonpath='{.spec.template.spec.initContainers[*].name}' 2>/dev/null) || return 0
+    [[ -z "${names}" ]] && return 0
+    for c in ${names}; do
+        # shellcheck disable=SC2086
+        timeout "${ADV_TIMEOUT}" oc logs -n "${ns}" "${res}" -c "${c}" ${LOG_ARGS} \
+            > "${prefix}-${c}.log" 2>/dev/null
+        [[ -s "${prefix}-${c}.log" ]] || rm -f "${prefix}-${c}.log"
+        # shellcheck disable=SC2086
+        timeout "${ADV_TIMEOUT}" oc logs -n "${ns}" "${res}" -c "${c}" --previous ${LOG_ARGS} \
+            > "${prefix}-${c}-previous.log" 2>/dev/null
+        [[ -s "${prefix}-${c}-previous.log" ]] || rm -f "${prefix}-${c}-previous.log"
+    done
+}
 
 # ---------- OpenShift internal-registry CA (cluster-scoped-ish) ----------
 # Used to debug Sensor/Collector "certificate signed by unknown authority" when
@@ -63,28 +86,24 @@ while IFS= read -r ns; do
             > "${ns_dir}/pvc-${pvc_name}-describe.txt" 2>/dev/null || true
     done < <(oc get pvc -n "${ns}" -o name 2>/dev/null)
 
-    # Central startup forensics (only where Central is deployed).
-    if resource_exists "deployment/central" "${ns}"; then
-        # db-init init-container log: current, then previous if the pod restarted.
-        # shellcheck disable=SC2086
-        if ! timeout "${ADV_TIMEOUT}" \
-            oc logs -n "${ns}" deployment/central -c db-init ${LOG_ARGS} \
-            > "${ns_dir}/central-db-init.log" 2>/dev/null || [[ ! -s "${ns_dir}/central-db-init.log" ]]; then
-            rm -f "${ns_dir}/central-db-init.log"
-        fi
-        # shellcheck disable=SC2086
-        timeout "${ADV_TIMEOUT}" \
-            oc logs -n "${ns}" deployment/central -c db-init --previous ${LOG_ARGS} \
-            > "${ns_dir}/central-db-init-previous.log" 2>/dev/null \
-            || rm -f "${ns_dir}/central-db-init-previous.log"
-    fi
-
-    # Central-DB migration / lock / slow-upgrade markers.
+    # Central-DB resource (statefulset in most installs, deployment in some).
     db_res=""
     if resource_exists "statefulset/central-db" "${ns}"; then
         db_res="statefulset/central-db"
     elif resource_exists "deployment/central-db" "${ns}"; then
         db_res="deployment/central-db"
+    fi
+
+    # Init-container logs (startup / permission forensics). The db-init step that
+    # prepares /var/lib/stackrox runs as an init container (name/location vary by
+    # version, e.g. init-db on central-db), so collect every init container of
+    # both Central and Central-DB. Files are named central-db-init-<container>.log
+    # so the analyzer can spot a data-volume permission CrashLoopBackOff.
+    if resource_exists "deployment/central" "${ns}"; then
+        collect_init_logs "${ns}" "deployment/central" "${ns_dir}/central-init"
+    fi
+    if [[ -n "${db_res}" ]]; then
+        collect_init_logs "${ns}" "${db_res}" "${ns_dir}/central-db-init"
     fi
     if [[ -n "${db_res}" ]]; then
         {

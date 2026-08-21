@@ -632,7 +632,9 @@ def check_db_init(adv, rep):
     """
     if not adv:
         return
-    logs = glob.glob(os.path.join(adv, "platform", "*", "central-db-init*.log"))
+    # File names vary by version - the db-init step may be an init container named
+    # init-db on central-db (central-db-init-init-db.log) or db-init on central.
+    logs = glob.glob(os.path.join(adv, "platform", "*", "central*init*.log"))
     if not logs:
         return  # not collected (old bundle / Central healthy) - stay quiet.
     perm_re = re.compile(r"permission denied|operation not permitted|"
@@ -644,7 +646,7 @@ def check_db_init(adv, rep):
         ns = os.path.basename(os.path.dirname(path))
         prev = " (previous)" if path.endswith("-previous.log") else ""
         txt = read_text(path) or ""
-        label = f"Central db-init [{ns}]{prev}"
+        label = f"Central init [{ns}]{prev}"
         perm = [ln.strip() for ln in txt.splitlines() if perm_re.search(ln)]
         fatal = [ln.strip() for ln in txt.splitlines() if fatal_re.search(ln)]
         if perm:
