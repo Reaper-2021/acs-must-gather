@@ -130,6 +130,18 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
   `oc describe` for the indexer / matcher / db deployments. Surfaces stuck
   vulnerability updates and never-ready or crash-looping Scanner V4 components
   that the Central-focused bundle misses. Reached over `oc port-forward`.
+- **`vuln-report/`** — an image-scan / CVE and policy-violation snapshot pulled
+  from Central's REST API (admin basic-auth over `oc port-forward`, the same
+  mechanism as the debug dump). The officially-supported bundle describes
+  Central's *health*; it does not carry the per-image CVE findings or the
+  violation list a support case usually turns on. Includes
+  `vuln-mgmt-workloads.json` (streaming `/v1/export/vuln-mgmt/workloads` — every
+  deployment joined to its images with full CVE data, the machine-readable
+  dataset the analyzer filters), `image-cves.csv` (human-readable image CVEs,
+  opens in any spreadsheet), `violations.json` (policy violations, paged), and
+  `alerts-summary-counts-*.json` (violation rollups by cluster / category).
+  Violations default to `ACTIVE,ATTEMPTED` to keep the bundle bounded on
+  long-lived clusters — set `ADV_VULN_ALERT_STATES` for a fuller history.
 
 ## Environment Variables
 
@@ -155,9 +167,12 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
 | `GATHER_ADV_TLS_CERTS` | Enable the TLS certificate expiry report | `true` |
 | `GATHER_ADV_FORENSICS` | Enable crash & upgrade forensics collection | `true` |
 | `GATHER_ADV_SCANNER_V4` | Enable Central-independent Scanner V4 health collection | `true` |
+| `GATHER_ADV_VULN_REPORT` | Enable the image-CVE / violation snapshot from Central's API | `true` |
 | `ADV_SC_TIMEOUT` | Timeout per secured-cluster endpoint call (seconds) | `DIAG_TIMEOUT` (`30`) |
 | `ADV_FORENSICS_TIMEOUT` | Timeout per forensics call (seconds) | `DIAG_TIMEOUT` (`30`) |
 | `ADV_SCANNER_V4_TIMEOUT` | Timeout per Scanner V4 endpoint call (seconds) | `DIAG_TIMEOUT` (`30`) |
+| `ADV_VULN_TIMEOUT` | Timeout per vuln-report API call (seconds) | `300` |
+| `ADV_VULN_ALERT_STATES` | Violation states to snapshot (comma-separated) | `ACTIVE,ATTEMPTED` |
 
 ## Analyzing a bundle
 
@@ -178,8 +193,11 @@ present — collection errors, Sensor↔Central connectivity, TLS-cert expiry,
 Sensor/Central heap and goroutine counts, Collector status, Scanner V4
 readiness / restart churn, admin events, and OOMKilled / restarting pods. The heap check reads each component's pod memory
 limit from its manifest and warns on the real percentage used (`WARN` ≥75%,
-`FAIL` ≥90%). Each check is `OK` / `WARN` / `FAIL` / `SKIP`; the process exits
-non-zero if any check `FAIL`s, so it is CI/scripting friendly.
+`FAIL` ≥90%). When the `vuln-report/` layer is present it also summarizes
+image-scan CVEs (flagging images with fixable critical / important findings) and
+policy violations by severity; pass `--image <name>` to drill into the per-CVE
+list for a specific image. Each check is `OK` / `WARN` / `FAIL` / `SKIP`; the
+process exits non-zero if any check `FAIL`s, so it is CI/scripting friendly.
 
 Requires `python3` (stdlib only). The heap checks use `go tool pprof` when `go`
 is installed; without it they `SKIP`.
