@@ -1,0 +1,15 @@
+# Local must-gather captures - never part of the image build context.
+must-gather.local.*/
+must-gather/
+
+# Host-side tooling and tests are not copied into the image.
+analysis/
+tests/
+
+# Repo/tooling cruft.
+.git/
+.github/
+__pycache__/
+*.pyc
+*.md
+Makefile
