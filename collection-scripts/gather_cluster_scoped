@@ -88,4 +88,31 @@ log_msg "Collecting node summary..."
 mkdir -p "${MUST_GATHER_DIR}/cluster-scoped-resources/core"
 oc get nodes -o wide > "${MUST_GATHER_DIR}/cluster-scoped-resources/core/nodes-summary.txt" 2>/dev/null || true
 
+# Node-to-kernel matrix: pins each node's OS image and kernel version so a
+# Collector CrashLoopBackOff after a node upgrade can be tied to the kernel it
+# is running on (see the advanced Scanner V4 / Collector triage).
+oc get nodes \
+    -o custom-columns=NAME:.metadata.name,OS-IMAGE:.status.nodeInfo.osImage,KERNEL-VERSION:.status.nodeInfo.kernelVersion,RUNTIME:.status.nodeInfo.containerRuntimeVersion \
+    > "${MUST_GATHER_DIR}/cluster-scoped-resources/core/node-kernel-matrix.txt" 2>/dev/null || true
+
+# ---------- ClusterVersion (OpenShift only) ----------
+# Channel, desired/current version, and upgrade history - essential context for
+# any "broke after an upgrade" case.
+if oc api-resources --api-group=config.openshift.io &>/dev/null 2>&1; then
+    log_msg "Collecting ClusterVersion..."
+    inspect_resource "clusterversion.config.openshift.io"
+fi
+
+# ---------- StorageClasses ----------
+# Central-DB PVC binding problems often trace back to the default/provisioner
+# StorageClass, which oc adm inspect does not otherwise collect.
+log_msg "Collecting StorageClasses..."
+inspect_resource "storageclasses.storage.k8s.io"
+
+# ---------- PersistentVolumes ----------
+# Cluster-scoped, so not captured by the per-namespace inspection. Needed to see
+# the PV backing Central-DB / Scanner-V4-DB (capacity, phase, reclaim policy).
+log_msg "Collecting PersistentVolumes..."
+inspect_resource "persistentvolumes"
+
 log_msg "--- gather_cluster_scoped: complete ---"

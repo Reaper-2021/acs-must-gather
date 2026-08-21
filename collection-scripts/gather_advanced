@@ -26,6 +26,9 @@
 #   gather_advanced_vuln_report     - image-scan / CVE and policy-violation
 #                                     snapshot from Central's API, for offline
 #                                     triage (analysis/acs-analyze --image).
+#   gather_advanced_platform        - platform scoping, storage, and startup
+#                                     forensics (db-init log, PVC describe,
+#                                     registry CA, sorted events).
 
 # shellcheck source=collection-scripts/common.sh
 source /usr/bin/common.sh
@@ -53,6 +56,9 @@ mkdir -p "${ADVANCED_DIR}"
     echo "  vuln-report/            - image-scan / CVE and policy-violation"
     echo "                            snapshot from Central's API, for offline"
     echo "                            triage."
+    echo "  platform/               - platform scoping, storage, and startup"
+    echo "                            forensics (db-init log, PVC describe,"
+    echo "                            registry CA, chronological events)."
 } > "${ADVANCED_DIR}/README.txt"
 
 PIDS=()
@@ -85,6 +91,12 @@ if [[ "${GATHER_ADV_VULN_REPORT:-true}" == "true" ]]; then
     /usr/bin/gather_advanced_vuln_report &
     PIDS+=($!)
     log_msg "Launched gather_advanced_vuln_report (PID: ${PIDS[-1]})"
+fi
+
+if [[ "${GATHER_ADV_PLATFORM:-true}" == "true" ]]; then
+    /usr/bin/gather_advanced_platform &
+    PIDS+=($!)
+    log_msg "Launched gather_advanced_platform (PID: ${PIDS[-1]})"
 fi
 
 for pid in "${PIDS[@]}"; do

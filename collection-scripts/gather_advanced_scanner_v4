@@ -99,6 +99,35 @@ while IFS= read -r ns; do
         fi
     done
 
+    # ---------- memory tuning (requests/limits + GOMEMLIMIT) ----------
+    # The matcher OOMs during Red Hat VEX feed updates when its Go soft-memory
+    # limit (GOMEMLIMIT) is unset or too close to the container limit. Extract
+    # both so the analyzer can correlate an OOM with the tuning.
+    for dep in scanner-v4-indexer scanner-v4-matcher; do
+        resource_exists "deployment/${dep}" "${ns}" || continue
+        {
+            echo "# ${dep} memory tuning"
+            echo "# namespace: ${ns}  generated: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo
+            oc get "deployment/${dep}" -n "${ns}" -o json 2>/dev/null | jq -r '
+                .spec.template.spec.containers[]
+                | "container: \(.name)"
+                , "  requests: \(.resources.requests // {})"
+                , "  limits:   \(.resources.limits // {})"
+                , "  GOMEMLIMIT: " + ((.env // []
+                    | map(select(.name=="GOMEMLIMIT").value) | first) // "(unset)")' \
+                || echo "(failed to read ${dep} deployment)"
+        } > "${ns_dir}/${dep}-memory-tuning.txt" 2>/dev/null || true
+    done
+
+    # ---------- services + endpoints ----------
+    # A matcher/indexer that never becomes ready (e.g. port-config startup
+    # failure) shows up as a Service with no ready endpoint addresses.
+    for comp in scanner-v4-indexer scanner-v4-matcher; do
+        oc get svc,endpoints -n "${ns}" -l "app=${comp}" -o yaml \
+            > "${ns_dir}/${comp}-endpoints.yaml" 2>/dev/null || true
+    done
+
 done <<< "${ACS_NAMESPACES}"
 
 log_msg "--- gather_advanced_scanner_v4: complete ---"

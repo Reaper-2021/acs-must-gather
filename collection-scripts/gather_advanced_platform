@@ -1,0 +1,140 @@
+#!/bin/bash
+
+# ACS Must-Gather - Advanced: Platform Scoping, Storage & Startup Forensics
+#
+# Targeted artifacts that map to recurring RHACS support cases but that a plain
+# `oc adm inspect` does not surface cleanly:
+#   - the db-init init-container log (permission / startup failures that are lost
+#     once the Central pod is recreated and easy to miss inside inspect output)
+#   - Central-DB Postgres migration / lock / slow-upgrade markers
+#   - `oc describe pvc` (binding events the PVC yaml alone does not show)
+#   - the OpenShift internal-registry CA configmap (image-registry-certificates),
+#     which lives outside the ACS namespaces and is needed to debug
+#     "x509: certificate signed by unknown authority" after a CA rotation
+#   - a single chronologically-sorted events file per namespace (timeline)
+#
+# Best-effort and isolated like every advanced sub-collector: any failure writes
+# a .error file and the script still exits 0.
+
+# shellcheck source=collection-scripts/common.sh
+source /usr/bin/common.sh
+
+log_msg "--- gather_advanced_platform: starting ---"
+
+OUT_DIR="${MUST_GATHER_DIR}/advanced-acs-diagnostics/platform"
+mkdir -p "${OUT_DIR}"
+
+ADV_TIMEOUT="${ADV_PLATFORM_TIMEOUT:-${DIAG_TIMEOUT:-30}}"
+LOG_ARGS="$(get_log_collection_args)"
+
+# Postgres migration / lock / slow-upgrade markers for the central-db log.
+# Deliberately excludes routine background activity (checkpoint / vacuum) so the
+# file carries signal, not noise.
+DB_MARKERS='migrat|deadlock|lock wait|lock timeout|lock is not available|canceling statement|timeout|slow|panic|FATAL|could not|out of memory|restore|rollback|upgrade'
+
+# RHACS PostgreSQL databases that share the init-db data-dir prep init container.
+# All are subject to the same data-volume permission CrashLoopBackOff, so the
+# same forensics (init-container logs + migration/lock markers) apply to each.
+DB_BASES="central-db scanner-db scanner-v4-db"
+
+# collect_init_logs <ns> <resource> <out_prefix>
+# Collect current + previous logs for every init container of <resource>. The
+# init container name and location vary by version (e.g. init-db on central-db),
+# so discover them rather than hardcoding. Empty logs are removed.
+collect_init_logs() {
+    local ns="$1" res="$2" prefix="$3" names c
+    names=$(oc get "${res}" -n "${ns}" \
+        -o jsonpath='{.spec.template.spec.initContainers[*].name}' 2>/dev/null) || return 0
+    [[ -z "${names}" ]] && return 0
+    for c in ${names}; do
+        # shellcheck disable=SC2086
+        timeout "${ADV_TIMEOUT}" oc logs -n "${ns}" "${res}" -c "${c}" ${LOG_ARGS} \
+            > "${prefix}-${c}.log" 2>/dev/null
+        [[ -s "${prefix}-${c}.log" ]] || rm -f "${prefix}-${c}.log"
+        # shellcheck disable=SC2086
+        timeout "${ADV_TIMEOUT}" oc logs -n "${ns}" "${res}" -c "${c}" --previous ${LOG_ARGS} \
+            > "${prefix}-${c}-previous.log" 2>/dev/null
+        [[ -s "${prefix}-${c}-previous.log" ]] || rm -f "${prefix}-${c}-previous.log"
+    done
+}
+
+# resolve_db_res <ns> <base>: echo statefulset/<base> or deployment/<base>,
+# whichever exists (installs vary), or nothing.
+resolve_db_res() {
+    local ns="$1" base="$2"
+    if resource_exists "statefulset/${base}" "${ns}"; then
+        echo "statefulset/${base}"
+    elif resource_exists "deployment/${base}" "${ns}"; then
+        echo "deployment/${base}"
+    fi
+}
+
+# ---------- OpenShift internal-registry CA (cluster-scoped-ish) ----------
+# Used to debug Sensor/Collector "certificate signed by unknown authority" when
+# talking to the internal registry after a CA rotation (public certs only).
+if oc get configmap image-registry-certificates -n openshift-image-registry &>/dev/null 2>&1; then
+    log_msg "Collecting image-registry-certificates configmap..."
+    oc get configmap image-registry-certificates -n openshift-image-registry -o yaml \
+        > "${OUT_DIR}/image-registry-certificates.yaml" 2>/dev/null \
+        || echo "failed to read image-registry-certificates" \
+            > "${OUT_DIR}/image-registry-certificates.yaml.error"
+else
+    echo "configmap image-registry-certificates not found in openshift-image-registry (non-OpenShift cluster, or no internal registry)." \
+        > "${OUT_DIR}/image-registry-certificates.yaml.skipped"
+fi
+
+# ---------- Per-namespace: events timeline, PVC describe, Central startup ----------
+while IFS= read -r ns; do
+    [[ -z "${ns}" ]] && continue
+    ns_dir="${OUT_DIR}/${ns}"
+    mkdir -p "${ns_dir}"
+
+    # Chronologically-sorted events (oc adm inspect writes events unsorted).
+    oc get events -n "${ns}" --sort-by='.metadata.creationTimestamp' \
+        > "${ns_dir}/events-sorted.txt" 2>/dev/null || true
+
+    # `oc describe pvc` per PVC - surfaces binding/provisioning events that the
+    # PVC yaml (collected by inspect) does not spell out.
+    while IFS= read -r pvc; do
+        [[ -z "${pvc}" ]] && continue
+        pvc_name="${pvc##*/}"
+        oc describe "pvc/${pvc_name}" -n "${ns}" \
+            > "${ns_dir}/pvc-${pvc_name}-describe.txt" 2>/dev/null || true
+    done < <(oc get pvc -n "${ns}" -o name 2>/dev/null)
+
+    # App-workload init containers. Central may run db-init here (older
+    # versions); Sensor runs the crs init container that performs CRS-based
+    # cluster registration and cert setup - if it fails the Secured Cluster
+    # never registers or connects. Files are named <workload>-init-<container>.log.
+    if resource_exists "deployment/central" "${ns}"; then
+        collect_init_logs "${ns}" "deployment/central" "${ns_dir}/central-init"
+    fi
+    if resource_exists "deployment/sensor" "${ns}"; then
+        collect_init_logs "${ns}" "deployment/sensor" "${ns_dir}/sensor-init"
+    fi
+
+    # Every RHACS PostgreSQL DB (central-db, scanner-db, scanner-v4-db) runs the
+    # same init-db init container that prepares its data directory - a permission
+    # error there is the classic CrashLoopBackOff, and the log is lost once the
+    # pod is recreated. Collect init-container logs (startup / permission
+    # forensics) and Postgres migration / lock / slow-upgrade markers for each.
+    # Files are named <db>-init-<container>.log and <db>-migration-markers.txt so
+    # the analyzer can spot a data-volume permission failure on any DB.
+    for db_base in ${DB_BASES}; do
+        db_res="$(resolve_db_res "${ns}" "${db_base}")"
+        [[ -z "${db_res}" ]] && continue
+        collect_init_logs "${ns}" "${db_res}" "${ns_dir}/${db_base}-init"
+        {
+            echo "# ${db_base} migration / lock / slow-upgrade markers"
+            echo "# namespace: ${ns}  resource: ${db_res}"
+            echo "# generated: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo
+            # shellcheck disable=SC2086
+            oc logs -n "${ns}" "${db_res}" --tail=-1 ${LOG_ARGS} 2>/dev/null \
+                | grep -niE "${DB_MARKERS}" | tail -200 \
+                || echo "(no migration/lock/upgrade markers found)"
+        } > "${ns_dir}/${db_base}-migration-markers.txt" 2>/dev/null || true
+    done
+done <<< "${ACS_NAMESPACES}"
+
+log_msg "--- gather_advanced_platform: complete ---"

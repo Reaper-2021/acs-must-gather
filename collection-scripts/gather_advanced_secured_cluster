@@ -28,7 +28,14 @@ PF_TIMEOUT="${ADV_SC_TIMEOUT:-${DIAG_TIMEOUT:-30}}"
 
 # Stable Sensor log markers that indicate connectivity / certificate state.
 # (These lines are asserted by StackRox tests, so they are safe to grep for.)
-CONNECTIVITY_MARKERS='Connecting to Central|Established connection to Central|Communication with central (started|ended)|different Central installation|not trusted|invalid trust info signature|checking central status over HTTP failed|re-apply Helm config|offline mode|Connected to Sensor'
+# "certificate signed by unknown authority" surfaces CA-rotation breakage where
+# Sensor can no longer trust Central or the OpenShift internal registry.
+CONNECTIVITY_MARKERS='Connecting to Central|Established connection to Central|Communication with central (started|ended)|different Central installation|not trusted|invalid trust info signature|certificate signed by unknown authority|checking central status over HTTP failed|re-apply Helm config|offline mode|Connected to Sensor'
+
+# Sensor emits this warning once per duplicated pod IP; on high-churn clusters the
+# accumulated set is a known driver of Sensor memory growth / OOMKills. We record
+# how often it occurs so the analyzer can flag it.
+IP_DUP_MARKER='belongs to 2 or more deployments'
 
 while IFS= read -r ns; do
     [[ -z "${ns}" ]] && continue
@@ -80,6 +87,25 @@ while IFS= read -r ns; do
                 | grep -niE "${CONNECTIVITY_MARKERS}" | tail -200 \
                 || echo "(no matching connectivity/cert markers found)"
         } > "${ns_dir}/sensor-connectivity-summary.txt" 2>/dev/null || true
+
+        # Duplicate-IP warning frequency (memory-growth signature). One cheap log
+        # pass; records the count plus a few sample lines for context.
+        {
+            echo "# Sensor duplicate-IP deployment warnings"
+            echo "# namespace: ${ns}  pod: ${sensor_pod}"
+            echo "# marker: ${IP_DUP_MARKER}"
+            echo "# generated: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo
+            dup_hits=$(oc logs -n "${ns}" "${sensor_pod}" -c sensor --tail=-1 2>/dev/null \
+                | grep -cF "${IP_DUP_MARKER}") || dup_hits=0
+            echo "count: ${dup_hits}"
+            if [[ "${dup_hits}" -gt 0 ]]; then
+                echo
+                echo "samples (last 10):"
+                oc logs -n "${ns}" "${sensor_pod}" -c sensor --tail=-1 2>/dev/null \
+                    | grep -F "${IP_DUP_MARKER}" | tail -10
+            fi
+        } > "${ns_dir}/sensor-ip-duplication.txt" 2>/dev/null || true
     else
         log_msg "  WARNING: no running Sensor pod in ${ns}"
         echo "no running Sensor pod" > "${ns_dir}/sensor.error"
