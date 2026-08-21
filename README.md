@@ -152,11 +152,12 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
   long-lived clusters — set `ADV_VULN_ALERT_STATES` for a fuller history.
 - **`platform/`** — platform scoping, storage, and startup forensics that map to
   recurring support cases but that `oc adm inspect` does not surface cleanly: the
-  Central `db-init` init-container log (current + previous — a permission error
-  on the data volume is the classic `db-init` CrashLoopBackOff, and the log is
-  lost once the pod is recreated), Central-DB Postgres migration / lock /
-  slow-upgrade markers, `oc describe pvc` (binding/provisioning events the PVC
-  yaml does not spell out), the OpenShift internal-registry CA configmap
+  `init-db` init-container log (current + previous) for **every** RHACS
+  PostgreSQL database — `central-db`, `scanner-db`, and `scanner-v4-db` — since a
+  permission error on the data volume is the classic `db-init` CrashLoopBackOff
+  and the log is lost once the pod is recreated, per-database Postgres migration
+  / lock / slow-upgrade markers, `oc describe pvc` (binding/provisioning events
+  the PVC yaml does not spell out), the OpenShift internal-registry CA configmap
   (`image-registry-certificates`, which lives outside the ACS namespaces and is
   needed to debug `x509: certificate signed by unknown authority` after a CA
   rotation), and a single chronologically-sorted events file per namespace.
@@ -212,7 +213,8 @@ clusters (collection method + version skew), distinct node kernel versions, and
 — when the advanced layer is present — collection errors, Sensor↔Central
 connectivity (including x509 CA-rotation breakage), TLS-cert expiry,
 Sensor/Central heap and goroutine counts, Collector status, Scanner V4
-readiness / restart churn, Central `db-init` permission/startup failures, the
+readiness / restart churn, `db-init` permission/startup failures on any RHACS
+database (central-db / scanner-db / scanner-v4-db), the
 Sensor duplicate-IP warning count, admin events, and OOMKilled / restarting
 pods. The heap check reads each component's pod memory
 limit from its manifest and warns on the real percentage used (`WARN` ≥75%,
