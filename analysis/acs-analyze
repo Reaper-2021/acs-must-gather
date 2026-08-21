@@ -622,6 +622,251 @@ def check_scanner_v4(adv, rep):
             rep.add(f"Scanner V4 [{ns}]", OK, detail)
 
 
+# ---------------------------------------------------------------------------
+# Image CVEs / vulnerabilities (advanced-acs-diagnostics/vuln-report/)
+# ---------------------------------------------------------------------------
+
+# storage.VulnerabilitySeverity enum -> short label.
+_SEV_SHORT = {
+    "CRITICAL_VULNERABILITY_SEVERITY": "CRITICAL",
+    "IMPORTANT_VULNERABILITY_SEVERITY": "IMPORTANT",
+    "MODERATE_VULNERABILITY_SEVERITY": "MODERATE",
+    "LOW_VULNERABILITY_SEVERITY": "LOW",
+    "UNKNOWN_VULNERABILITY_SEVERITY": "UNKNOWN",
+}
+
+
+def _g(d, *keys):
+    """First present key from a dict (tolerates camelCase / snake_case JSON)."""
+    if isinstance(d, dict):
+        for k in keys:
+            if k in d and d[k] is not None:
+                return d[k]
+    return None
+
+
+def _iter_workloads(path):
+    """Yield (deployment, image) from the vuln-mgmt export.
+
+    The export is a stream of `{"result": {"deployment":..., "images":[...]}}`
+    objects, normally one JSON object per line. Fall back to a single JSON doc
+    (object or array) if it was buffered that way.
+    """
+    txt = read_text(path)
+    if not txt:
+        return
+    emitted = False
+    for line in txt.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        emitted = True
+        res = obj.get("result", obj) if isinstance(obj, dict) else obj
+        if not isinstance(res, dict):
+            continue
+        dep = res.get("deployment") or {}
+        for img in (res.get("images") or []):
+            yield dep, img
+    if emitted:
+        return
+    # Fallback: whole-file JSON (array of results or single result).
+    data = read_json(path)
+    items = data if isinstance(data, list) else [data] if data else []
+    for obj in items:
+        if not isinstance(obj, dict):
+            continue
+        res = obj.get("result", obj)
+        if not isinstance(res, dict):
+            continue
+        dep = res.get("deployment") or {}
+        for img in (res.get("images") or []):
+            yield dep, img
+
+
+def _image_full_name(img):
+    name = _g(img, "name") or {}
+    return _g(name, "fullName", "full_name") or _g(img, "id") or "<unknown image>"
+
+
+def _image_vulns(img):
+    """Yield each (component, vuln) for an image's scan."""
+    scan = _g(img, "scan") or {}
+    for comp in (_g(scan, "components") or []):
+        for vuln in (_g(comp, "vulns") or []):
+            yield comp, vuln
+
+
+def _vuln_is_fixable(vuln):
+    return bool(_g(vuln, "fixedBy", "fixed_by"))
+
+
+def check_image_cves(adv, rep, image_filter=None):
+    """Summarize image-scan CVE findings; drill into one image with --image."""
+    if not adv:
+        return
+    path = os.path.join(adv, "vuln-report", "vuln-mgmt-workloads.json")
+    if not os.path.exists(path):
+        return  # collector didn't run / no data - stay quiet.
+
+    # Aggregate per unique image. An image commonly backs many deployments, so
+    # count each image's CVEs exactly once (keyed by full name); within an image,
+    # a CVE can appear in several components, so dedupe by CVE too. This keeps the
+    # summary consistent with the --image drill-down.
+    images = {}  # full_name -> {total, fixable, crit, imp, fix_crit, fix_imp}
+    for _dep, img in _iter_workloads(path):
+        fn = _image_full_name(img)
+        if fn in images:
+            continue
+        agg = images[fn] = {
+            "total": 0, "fixable": 0, "crit": 0, "imp": 0,
+            "fix_crit": 0, "fix_imp": 0,
+        }
+        seen = set()
+        for _comp, vuln in _image_vulns(img):
+            if _g(vuln, "suppressed"):
+                continue  # snoozed CVE - not actionable
+            cve = _g(vuln, "cve")
+            if cve in seen:
+                continue  # same CVE across components - count once per image
+            seen.add(cve)
+            sev = _SEV_SHORT.get(_g(vuln, "severity") or "", "UNKNOWN")
+            fixable = _vuln_is_fixable(vuln)
+            agg["total"] += 1
+            if fixable:
+                agg["fixable"] += 1
+            if sev == "CRITICAL":
+                agg["crit"] += 1
+                if fixable:
+                    agg["fix_crit"] += 1
+            elif sev == "IMPORTANT":
+                agg["imp"] += 1
+                if fixable:
+                    agg["fix_imp"] += 1
+
+    if not images:
+        rep.add("Image CVEs", INFO, "no image scan data in vuln-report/")
+        return
+
+    # ---- Drill-down mode: --image <substring> ----
+    if image_filter:
+        needle = image_filter.lower()
+        matched = _image_cve_detail(path, needle)
+        if not matched:
+            rep.add(f"Image CVEs [{image_filter}]", INFO,
+                    "no scanned image matches this filter")
+            return
+        for fn, rows in matched.items():
+            fix = sum(1 for r in rows if r[3])
+            crit = sum(1 for r in rows if r[1] == "CRITICAL")
+            status = WARN if any(r[3] and r[1] in ("CRITICAL", "IMPORTANT")
+                                 for r in rows) else INFO
+            # Worst first: fixable, then severity, then CVSS.
+            sev_rank = {"CRITICAL": 0, "IMPORTANT": 1, "MODERATE": 2,
+                        "LOW": 3, "UNKNOWN": 4}
+            rows.sort(key=lambda r: (not r[3], sev_rank.get(r[1], 9), -r[4]))
+            lines = [f"{r[0]}  {r[1]:<9} "
+                     f"{'fixable->' + r[5] if r[3] else 'no fix'}  "
+                     f"CVSS {r[4]:.1f}  [{r[2]}]"
+                     for r in rows[:40]]
+            if len(rows) > 40:
+                lines.append(f"... and {len(rows) - 40} more")
+            rep.add(f"Image CVEs [{fn}]", status,
+                    f"{len(rows)} CVE(s), {fix} fixable, {crit} critical", lines)
+        return
+
+    # ---- Summary mode ----
+    total_imgs = len(images)
+    fix_crit_imgs = [(fn, a) for fn, a in images.items() if a["fix_crit"] > 0]
+    fix_imp_imgs = [(fn, a) for fn, a in images.items() if a["fix_imp"] > 0]
+
+    if fix_crit_imgs:
+        status, detail = WARN, (f"{len(fix_crit_imgs)}/{total_imgs} image(s) "
+                                "with FIXABLE CRITICAL CVEs")
+    elif fix_imp_imgs:
+        status, detail = WARN, (f"{len(fix_imp_imgs)}/{total_imgs} image(s) "
+                                "with FIXABLE IMPORTANT CVEs")
+    else:
+        status, detail = INFO, f"{total_imgs} image(s) scanned; no fixable critical/important CVEs"
+
+    # Top offenders by fixable count (then by total).
+    ranked = sorted(images.items(),
+                    key=lambda kv: (kv[1]["fixable"], kv[1]["total"]),
+                    reverse=True)
+    lines = []
+    for fn, a in ranked[:10]:
+        if a["total"] == 0:
+            continue
+        lines.append(f"{fn}  {a['total']} CVEs "
+                     f"({a['fixable']} fixable, {a['fix_crit']} fix-crit, "
+                     f"{a['fix_imp']} fix-imp)")
+    lines.append("(use: acs-analyze --image <name> for the per-CVE list)")
+    rep.add("Image CVEs", status, detail, lines)
+
+
+def _image_cve_detail(path, needle):
+    """For --image: {full_name: [(cve, sev, component, fixable, cvss, fixedBy)]}."""
+    matched = {}
+    for _dep, img in _iter_workloads(path):
+        fn = _image_full_name(img)
+        if needle not in fn.lower():
+            continue
+        if fn in matched:
+            continue  # same image can recur across deployments
+        rows = []
+        seen = set()
+        for comp, vuln in _image_vulns(img):
+            cve = _g(vuln, "cve") or "?"
+            if cve in seen:
+                continue
+            seen.add(cve)
+            sev = _SEV_SHORT.get(_g(vuln, "severity") or "", "UNKNOWN")
+            comp_name = _g(comp, "name") or "?"
+            fixable = _vuln_is_fixable(vuln)
+            fixed_by = _g(vuln, "fixedBy", "fixed_by") or ""
+            try:
+                cvss = float(_g(vuln, "cvss") or 0.0)
+            except (TypeError, ValueError):
+                cvss = 0.0
+            rows.append((cve, sev, comp_name, fixable, cvss, fixed_by))
+        matched[fn] = rows
+    return matched
+
+
+def check_violations(adv, rep):
+    """Summarize policy violations captured in vuln-report/violations.json."""
+    if not adv:
+        return
+    path = os.path.join(adv, "vuln-report", "violations.json")
+    data = read_json(path)
+    if not data:
+        return  # not collected - stay quiet.
+    alerts = data.get("alerts") if isinstance(data, dict) else None
+    if not isinstance(alerts, list):
+        return
+    if not alerts:
+        rep.add("Policy violations", OK, "no active violations captured")
+        return
+    sev = {}
+    stages = {}
+    for a in alerts:
+        pol = a.get("policy") or {}
+        s = (pol.get("severity") or "UNKNOWN").replace("_SEVERITY", "")
+        sev[s] = sev.get(s, 0) + 1
+        st = a.get("lifecycleStage") or a.get("lifecycle_stage") or "?"
+        stages[st] = stages.get(st, 0) + 1
+    order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
+    sev_str = ", ".join(f"{k}={sev[k]}" for k in order if sev.get(k))
+    stage_str = ", ".join(f"{k}={v}" for k, v in sorted(stages.items()))
+    status = WARN if sev.get("CRITICAL") else INFO
+    rep.add("Policy violations", status,
+            f"{len(alerts)} violation(s): {sev_str}",
+            [f"by lifecycle: {stage_str}"])
+
+
 def check_crashes(adv, bundle, rep):
     """OOMKilled / restart churn, from the advanced describe or pod manifests."""
     # Preferred: advanced-layer describe-pods.txt (human readable last-state).
@@ -719,6 +964,9 @@ def main(argv=None):
         description="Health report for an extracted ACS must-gather bundle.")
     parser.add_argument("path", nargs="?", default=".",
                         help="path to the must-gather (default: current dir)")
+    parser.add_argument("--image", metavar="SUBSTRING", default=None,
+                        help="drill into image-scan CVEs for images whose name "
+                             "contains SUBSTRING (from vuln-report/)")
     args = parser.parse_args(argv)
 
     bundle = discover_bundle(args.path)
@@ -743,6 +991,8 @@ def main(argv=None):
     check_goroutines(adv, bundle, rep)
     check_collector(adv, rep)
     check_scanner_v4(adv, rep)
+    check_image_cves(adv, rep, image_filter=args.image)
+    check_violations(adv, rep)
     check_admin_events(adv, rep)
     check_crashes(adv, bundle, rep)
 

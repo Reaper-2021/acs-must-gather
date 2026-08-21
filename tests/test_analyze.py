@@ -208,5 +208,171 @@ class ScannerV4Test(unittest.TestCase):
             self.assertEqual(rep.results, [])
 
 
+def _vuln(cve, sev, fixed_by=None, cvss=7.0, suppressed=False):
+    v = {"cve": cve, "severity": sev, "cvss": cvss}
+    if fixed_by:
+        v["fixedBy"] = fixed_by
+    if suppressed:
+        v["suppressed"] = True
+    return v
+
+
+def _workload_line(dep_ns, dep_name, image_full, vulns):
+    """One NDJSON line as the vuln-mgmt export emits it."""
+    return json.dumps({"result": {
+        "deployment": {"namespace": dep_ns, "name": dep_name},
+        "images": [{
+            "name": {"fullName": image_full},
+            "scan": {"components": [{"name": "openssl", "vulns": vulns}]},
+        }],
+    }})
+
+
+class ImageCveTest(unittest.TestCase):
+    def _write_export(self, adv, lines):
+        _write(os.path.join(adv, "vuln-report", "vuln-mgmt-workloads.json"),
+               "\n".join(lines) + "\n")
+
+    def test_absent_is_silent(self):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            os.makedirs(adv)
+            rep = ACS.Report()
+            ACS.check_image_cves(adv, rep)
+            self.assertEqual(rep.results, [])
+
+    def test_fixable_critical_warns(self):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            self._write_export(adv, [_workload_line(
+                "stackrox", "central", "quay.io/rhacs/main:4.5",
+                [_vuln("CVE-2024-1", "CRITICAL_VULNERABILITY_SEVERITY", "1.1.1w"),
+                 _vuln("CVE-2024-2", "LOW_VULNERABILITY_SEVERITY")])])
+            rep = ACS.Report()
+            ACS.check_image_cves(adv, rep)
+            r = rep.results[0]
+            self.assertEqual(r.status, ACS.WARN)
+            self.assertIn("FIXABLE CRITICAL", r.detail)
+
+    def test_no_fixable_is_info(self):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            self._write_export(adv, [_workload_line(
+                "stackrox", "central", "quay.io/rhacs/main:4.5",
+                [_vuln("CVE-2024-3", "MODERATE_VULNERABILITY_SEVERITY")])])
+            rep = ACS.Report()
+            ACS.check_image_cves(adv, rep)
+            self.assertEqual(rep.results[0].status, ACS.INFO)
+
+    def test_suppressed_cve_ignored(self):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            self._write_export(adv, [_workload_line(
+                "stackrox", "central", "quay.io/rhacs/main:4.5",
+                [_vuln("CVE-2024-4", "CRITICAL_VULNERABILITY_SEVERITY",
+                       "1.1.1w", suppressed=True)])])
+            rep = ACS.Report()
+            ACS.check_image_cves(adv, rep)
+            # Only suppressed CVE present -> no fixable critical -> INFO.
+            self.assertEqual(rep.results[0].status, ACS.INFO)
+
+    def test_shared_image_counted_once(self):
+        # Same image backs two deployments -> its CVEs must be counted once, not
+        # doubled. (Regression: earlier the summary multiplied by deployments.)
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            self._write_export(adv, [
+                _workload_line("ns1", "app1", "quay.io/x/shared:1",
+                               [_vuln("CVE-A", "CRITICAL_VULNERABILITY_SEVERITY", "1.1")]),
+                _workload_line("ns2", "app2", "quay.io/x/shared:1",
+                               [_vuln("CVE-A", "CRITICAL_VULNERABILITY_SEVERITY", "1.1")]),
+            ])
+            rep = ACS.Report()
+            ACS.check_image_cves(adv, rep)
+            r = rep.results[0]
+            # One image, one fixable-critical CVE (not two).
+            self.assertIn("1/1 image(s)", r.detail)
+            self.assertTrue(any("1 CVEs (1 fixable, 1 fix-crit" in ln
+                                for ln in r.lines), r.lines)
+
+    def test_same_cve_across_components_counted_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            _write(os.path.join(adv, "vuln-report", "vuln-mgmt-workloads.json"),
+                   json.dumps({"result": {
+                       "deployment": {"namespace": "ns", "name": "app"},
+                       "images": [{
+                           "name": {"fullName": "quay.io/x/img:1"},
+                           "scan": {"components": [
+                               {"name": "libc", "vulns": [
+                                   _vuln("CVE-DUP", "CRITICAL_VULNERABILITY_SEVERITY", "1.1")]},
+                               {"name": "libssl", "vulns": [
+                                   _vuln("CVE-DUP", "CRITICAL_VULNERABILITY_SEVERITY", "1.1")]},
+                           ]},
+                       }],
+                   }}) + "\n")
+            rep = ACS.Report()
+            ACS.check_image_cves(adv, rep)
+            self.assertTrue(any("1 CVEs" in ln for ln in rep.results[0].lines),
+                            rep.results[0].lines)
+
+    def test_image_filter_drilldown(self):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            self._write_export(adv, [
+                _workload_line("stackrox", "central", "quay.io/rhacs/main:4.5",
+                               [_vuln("CVE-2024-1", "CRITICAL_VULNERABILITY_SEVERITY", "1.1.1w")]),
+                _workload_line("app", "web", "docker.io/library/nginx:1.20",
+                               [_vuln("CVE-2024-9", "LOW_VULNERABILITY_SEVERITY")]),
+            ])
+            rep = ACS.Report()
+            ACS.check_image_cves(adv, rep, image_filter="nginx")
+            self.assertEqual(len(rep.results), 1)
+            self.assertIn("nginx", rep.results[0].name)
+            self.assertIn("CVE-2024-9", " ".join(rep.results[0].lines))
+
+    def test_image_filter_no_match(self):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            self._write_export(adv, [_workload_line(
+                "stackrox", "central", "quay.io/rhacs/main:4.5",
+                [_vuln("CVE-2024-1", "CRITICAL_VULNERABILITY_SEVERITY", "1.1.1w")])])
+            rep = ACS.Report()
+            ACS.check_image_cves(adv, rep, image_filter="doesnotexist")
+            self.assertEqual(rep.results[0].status, ACS.INFO)
+            self.assertIn("no scanned image matches", rep.results[0].detail)
+
+
+class ViolationsTest(unittest.TestCase):
+    def _run(self, alerts_obj):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            _write_json(os.path.join(adv, "vuln-report", "violations.json"),
+                        alerts_obj)
+            rep = ACS.Report()
+            ACS.check_violations(adv, rep)
+            return rep.results
+
+    def test_critical_violation_warns(self):
+        results = self._run({"alerts": [
+            {"policy": {"severity": "CRITICAL_SEVERITY"}, "lifecycleStage": "RUNTIME"},
+            {"policy": {"severity": "LOW_SEVERITY"}, "lifecycleStage": "DEPLOY"},
+        ]})
+        self.assertEqual(results[0].status, ACS.WARN)
+        self.assertIn("CRITICAL=1", results[0].detail)
+
+    def test_empty_alerts_ok(self):
+        results = self._run({"alerts": []})
+        self.assertEqual(results[0].status, ACS.OK)
+
+    def test_absent_is_silent(self):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            os.makedirs(adv)
+            rep = ACS.Report()
+            ACS.check_violations(adv, rep)
+            self.assertEqual(rep.results, [])
+
+
 if __name__ == "__main__":
     unittest.main()

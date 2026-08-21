@@ -23,6 +23,9 @@
 #   gather_advanced_scanner_v4      - Central-independent Scanner V4 health
 #                                     (indexer/matcher readiness + metrics,
 #                                     pod state, vuln-updater log markers).
+#   gather_advanced_vuln_report     - image-scan / CVE and policy-violation
+#                                     snapshot from Central's API, for offline
+#                                     triage (analysis/acs-analyze --image).
 
 # shellcheck source=collection-scripts/common.sh
 source /usr/bin/common.sh
@@ -47,6 +50,9 @@ mkdir -p "${ADVANCED_DIR}"
     echo "  scanner-v4/             - Central-independent Scanner V4 health"
     echo "                            (indexer/matcher readiness + metrics,"
     echo "                            pod state, vuln-updater log markers)."
+    echo "  vuln-report/            - image-scan / CVE and policy-violation"
+    echo "                            snapshot from Central's API, for offline"
+    echo "                            triage."
 } > "${ADVANCED_DIR}/README.txt"
 
 PIDS=()
@@ -73,6 +79,12 @@ if [[ "${GATHER_ADV_SCANNER_V4:-true}" == "true" ]]; then
     /usr/bin/gather_advanced_scanner_v4 &
     PIDS+=($!)
     log_msg "Launched gather_advanced_scanner_v4 (PID: ${PIDS[-1]})"
+fi
+
+if [[ "${GATHER_ADV_VULN_REPORT:-true}" == "true" ]]; then
+    /usr/bin/gather_advanced_vuln_report &
+    PIDS+=($!)
+    log_msg "Launched gather_advanced_vuln_report (PID: ${PIDS[-1]})"
 fi
 
 for pid in "${PIDS[@]}"; do
