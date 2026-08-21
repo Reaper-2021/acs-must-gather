@@ -623,50 +623,74 @@ def check_scanner_v4(adv, rep):
             rep.add(f"Scanner V4 [{ns}]", OK, detail)
 
 
-def check_db_init(adv, rep):
-    """DB init-container failures (permission / startup errors).
+# RHACS PostgreSQL databases whose init container prepares a data volume.
+DB_INIT_BASES = ("central-db", "scanner-db", "scanner-v4-db")
 
-    Every RHACS PostgreSQL database (central-db, scanner-db, scanner-v4-db)
-    shares the same init-db init container that prepares its data directory; the
-    logs are captured by advanced-acs-diagnostics/platform/<ns>/ as
-    <db>-init-<container>.log. A permission error on the data volume is the
-    classic db-init CrashLoopBackOff (KCS 7035376); a panic / fatal is a startup
-    failure worth surfacing.
+
+def check_db_init(adv, rep):
+    """Init-container failures (permission / startup / registration errors).
+
+    Two families of init containers are triaged:
+      - the init-db data-dir prep container shared by every RHACS PostgreSQL
+        database (central-db, scanner-db, scanner-v4-db) - a permission error on
+        the data volume is the classic db-init CrashLoopBackOff (KCS 7035376);
+      - the Sensor crs init container that performs CRS-based cluster
+        registration and cert setup - a failure there stops the Secured Cluster
+        from registering or connecting.
+    Logs are captured by advanced-acs-diagnostics/platform/<ns>/ as
+    <workload>-init-<container>.log. A panic / fatal is a startup failure worth
+    surfacing for either family.
     """
     if not adv:
         return
-    # File names are <db>-init-<container>.log (e.g. central-db-init-init-db.log,
-    # scanner-db-init-init-db.log). The db base and container name both vary by
-    # version, so match any init log rather than hardcoding.
+    # File names are <workload>-init-<container>.log (e.g.
+    # central-db-init-init-db.log, sensor-init-crs.log). Base and container name
+    # both vary by version, so match any init log rather than hardcoding.
     logs = glob.glob(os.path.join(adv, "platform", "*", "*init*.log"))
     if not logs:
-        return  # not collected (old bundle / DBs healthy) - stay quiet.
+        return  # not collected (old bundle / all healthy) - stay quiet.
     perm_re = re.compile(r"permission denied|operation not permitted|"
                          r"cannot create|mkdir.*denied|read-only file system",
                          re.IGNORECASE)
     fatal_re = re.compile(r"\bpanic\b|\bfatal\b|nil pointer|"
                           r"runtime error|dereference", re.IGNORECASE)
+    # crs-specific registration failures (Sensor cannot register with Central).
+    reg_re = re.compile(r"failed to register|registration failed|"
+                        r"unauthorized|permission.*denied|"
+                        r"failed to (obtain|issue|fetch).*cert|"
+                        r"could not.*(register|certificate)", re.IGNORECASE)
     for path in sorted(logs):
         ns = os.path.basename(os.path.dirname(path))
         prev = " (previous)" if path.endswith("-previous.log") else ""
         fname = os.path.basename(path)
         stem = fname[:-len(".log")] if fname.endswith(".log") else fname
-        # Recover the DB base (central-db / scanner-db / scanner-v4-db / central)
-        # from the "<base>-init-<container>" file stem. None of the bases contain
-        # "-init", so splitting on it isolates the base reliably.
-        comp = stem.split("-init")[0] or "db"
+        # Recover the workload base (central-db / scanner-db / scanner-v4-db /
+        # central / sensor) from the "<base>-init-<container>" file stem. None of
+        # the bases contain "-init", so splitting on it isolates the base.
+        comp = stem.split("-init")[0] or "init"
+        is_db = comp in DB_INIT_BASES
         txt = read_text(path) or ""
         label = f"{comp} init [{ns}]{prev}"
         perm = [ln.strip() for ln in txt.splitlines() if perm_re.search(ln)]
         fatal = [ln.strip() for ln in txt.splitlines() if fatal_re.search(ln)]
-        if perm:
+        reg = [] if is_db else [ln.strip() for ln in txt.splitlines()
+                                if reg_re.search(ln)]
+        if is_db and perm:
             rep.add(label, FAIL,
                     f"permission error on the {comp} data volume "
                     "(init-db CrashLoopBackOff)", perm[:6])
+        elif perm:
+            rep.add(label, FAIL,
+                    f"permission error in the {comp} init container", perm[:6])
+        elif reg:
+            rep.add(label, FAIL,
+                    f"{comp} cluster-registration/cert failure "
+                    "(Secured Cluster will not connect)", reg[:6])
         elif fatal:
-            rep.add(label, FAIL, "fatal error during db-init startup", fatal[:6])
+            rep.add(label, FAIL, f"fatal error during {comp} init startup",
+                    fatal[:6])
         else:
-            rep.add(label, OK, "no permission/startup errors in db-init log")
+            rep.add(label, OK, "no permission/startup errors in init log")
 
 
 def check_sensor_ip_dup(adv, rep):

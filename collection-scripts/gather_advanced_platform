@@ -102,10 +102,15 @@ while IFS= read -r ns; do
             > "${ns_dir}/pvc-${pvc_name}-describe.txt" 2>/dev/null || true
     done < <(oc get pvc -n "${ns}" -o name 2>/dev/null)
 
-    # Central deployment init containers (older versions run db-init here).
-    # Files are named central-init-<container>.log.
+    # App-workload init containers. Central may run db-init here (older
+    # versions); Sensor runs the crs init container that performs CRS-based
+    # cluster registration and cert setup - if it fails the Secured Cluster
+    # never registers or connects. Files are named <workload>-init-<container>.log.
     if resource_exists "deployment/central" "${ns}"; then
         collect_init_logs "${ns}" "deployment/central" "${ns_dir}/central-init"
+    fi
+    if resource_exists "deployment/sensor" "${ns}"; then
+        collect_init_logs "${ns}" "deployment/sensor" "${ns_dir}/sensor-init"
     fi
 
     # Every RHACS PostgreSQL DB (central-db, scanner-db, scanner-v4-db) runs the

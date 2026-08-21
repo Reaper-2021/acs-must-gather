@@ -417,6 +417,28 @@ class DbInitTest(unittest.TestCase):
         self.assertEqual(results[0].status, ACS.OK)
         self.assertIn("scanner-v4-db init", results[0].name)
 
+    def test_sensor_crs_registration_failure_fails(self):
+        # The Sensor crs init container registers the Secured Cluster; a
+        # registration/cert failure there is triaged distinctly from a DB volume.
+        results = self._run("sensor-init-crs.log",
+                            "crs.go:60: Info: registering cluster\n"
+                            "crs.go:88: Error: failed to register cluster: "
+                            "unauthorized\n")
+        self.assertEqual(results[0].status, ACS.FAIL)
+        self.assertIn("sensor init", results[0].name)
+        self.assertIn("registration", results[0].detail)
+
+    def test_sensor_crs_clean_ok(self):
+        # The real healthy crs log wording must not false-positive.
+        results = self._run(
+            "sensor-init-crs.log",
+            "crs.go:48: Info: Ensuring certificates for Secured Cluster "
+            "services are present.\n"
+            "crs.go:60: Info: Sensor service certificate available, skipping "
+            "CRS-based cluster registration.\n")
+        self.assertEqual(results[0].status, ACS.OK)
+        self.assertIn("sensor init", results[0].name)
+
     def test_absent_is_silent(self):
         with tempfile.TemporaryDirectory() as d:
             adv = os.path.join(d, "advanced-acs-diagnostics")
