@@ -155,8 +155,10 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
   `init-db` init-container log (current + previous) for **every** RHACS
   PostgreSQL database — `central-db`, `scanner-db`, and `scanner-v4-db` — since a
   permission error on the data volume is the classic `db-init` CrashLoopBackOff
-  and the log is lost once the pod is recreated, per-database Postgres migration
-  / lock / slow-upgrade markers, `oc describe pvc` (binding/provisioning events
+  and the log is lost once the pod is recreated, the Sensor `crs` init-container
+  log (CRS-based cluster registration and cert setup — a failure there stops the
+  Secured Cluster from registering or connecting), per-database Postgres
+  migration / lock / slow-upgrade markers, `oc describe pvc` (binding/provisioning events
   the PVC yaml does not spell out), the OpenShift internal-registry CA configmap
   (`image-registry-certificates`, which lives outside the ACS namespaces and is
   needed to debug `x509: certificate signed by unknown authority` after a CA
