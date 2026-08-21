@@ -49,7 +49,8 @@ oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest -
 - ValidatingWebhookConfigurations and MutatingWebhookConfigurations
 - ClusterRoles and ClusterRoleBindings
 - SecurityContextConstraints (OpenShift)
-- Node summary
+- Node summary and a node-to-kernel matrix (OS image + kernel version per node)
+- ClusterVersion (OpenShift), StorageClasses, and PersistentVolumes
 
 ### Central Diagnostics
 - `/v1/metadata` — Central version and build info
@@ -109,9 +110,12 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
   login** — exactly what is missing when Sensor cannot reach Central. Includes
   Sensor's pprof heap/goroutine dumps and its cluster-entities store, Prometheus
   `/metrics` from Sensor / Admission Controller / Collector, the Collector
-  probe/driver type (`COLLECTION_METHOD`) and pod state, and a grep'd
-  connectivity/certificate summary from the Sensor log. Reached over
-  `oc port-forward`, which can also read the loopback-only debug servers.
+  probe/driver type (`COLLECTION_METHOD`) and pod state, a grep'd
+  connectivity/certificate summary from the Sensor log (including
+  `certificate signed by unknown authority`, the CA-rotation signature), and a
+  count of the `belongs to 2 or more deployments` duplicate-IP warning (a known
+  Sensor memory-growth driver). Reached over `oc port-forward`, which can also
+  read the loopback-only debug servers.
 - **`tls-certs/`** — an X.509 expiry report (`cert-expiry-summary.txt`) for the
   RHACS service certificates. `oc adm inspect` redacts secrets, so expired or
   mismatched certs are otherwise invisible. **Only public certificate material
@@ -126,10 +130,14 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
   (phase / ready / restarts / last-state / image), each component's
   `/health/readiness` (HTTPS 9443) and Prometheus `/metrics` (9091, best-effort —
   secure metrics may need a client cert, in which case an `.error` is written),
-  vulnerability-updater / definitions markers grep'd from the component logs, and
-  `oc describe` for the indexer / matcher / db deployments. Surfaces stuck
-  vulnerability updates and never-ready or crash-looping Scanner V4 components
-  that the Central-focused bundle misses. Reached over `oc port-forward`.
+  vulnerability-updater / definitions markers grep'd from the component logs,
+  `oc describe` for the indexer / matcher / db deployments, a memory-tuning
+  summary (requests / limits + `GOMEMLIMIT`, to correlate matcher OOMs during
+  VEX feed updates), and the component `Service` / `Endpoints` (a matcher or
+  indexer that never becomes ready shows up as a Service with no ready
+  endpoints). Surfaces stuck vulnerability updates and never-ready or
+  crash-looping Scanner V4 components that the Central-focused bundle misses.
+  Reached over `oc port-forward`.
 - **`vuln-report/`** — an image-scan / CVE and policy-violation snapshot pulled
   from Central's REST API (admin basic-auth over `oc port-forward`, the same
   mechanism as the debug dump). The officially-supported bundle describes
@@ -142,6 +150,16 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
   `alerts-summary-counts-*.json` (violation rollups by cluster / category).
   Violations default to `ACTIVE,ATTEMPTED` to keep the bundle bounded on
   long-lived clusters — set `ADV_VULN_ALERT_STATES` for a fuller history.
+- **`platform/`** — platform scoping, storage, and startup forensics that map to
+  recurring support cases but that `oc adm inspect` does not surface cleanly: the
+  Central `db-init` init-container log (current + previous — a permission error
+  on the data volume is the classic `db-init` CrashLoopBackOff, and the log is
+  lost once the pod is recreated), Central-DB Postgres migration / lock /
+  slow-upgrade markers, `oc describe pvc` (binding/provisioning events the PVC
+  yaml does not spell out), the OpenShift internal-registry CA configmap
+  (`image-registry-certificates`, which lives outside the ACS namespaces and is
+  needed to debug `x509: certificate signed by unknown authority` after a CA
+  rotation), and a single chronologically-sorted events file per namespace.
 
 ## Environment Variables
 
@@ -168,11 +186,13 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
 | `GATHER_ADV_FORENSICS` | Enable crash & upgrade forensics collection | `true` |
 | `GATHER_ADV_SCANNER_V4` | Enable Central-independent Scanner V4 health collection | `true` |
 | `GATHER_ADV_VULN_REPORT` | Enable the image-CVE / violation snapshot from Central's API | `true` |
+| `GATHER_ADV_PLATFORM` | Enable platform scoping, storage & startup forensics (db-init log, PVC describe, registry CA, sorted events) | `true` |
 | `ADV_SC_TIMEOUT` | Timeout per secured-cluster endpoint call (seconds) | `DIAG_TIMEOUT` (`30`) |
 | `ADV_FORENSICS_TIMEOUT` | Timeout per forensics call (seconds) | `DIAG_TIMEOUT` (`30`) |
 | `ADV_SCANNER_V4_TIMEOUT` | Timeout per Scanner V4 endpoint call (seconds) | `DIAG_TIMEOUT` (`30`) |
 | `ADV_VULN_TIMEOUT` | Timeout per vuln-report API call (seconds) | `300` |
 | `ADV_VULN_ALERT_STATES` | Violation states to snapshot (comma-separated) | `ACTIVE,ATTEMPTED` |
+| `ADV_PLATFORM_TIMEOUT` | Timeout per platform-forensics log call (seconds) | `DIAG_TIMEOUT` (`30`) |
 
 ## Analyzing a bundle
 
@@ -188,10 +208,13 @@ make analyze BUNDLE=path/to/must-gather.local.XXXX
 ```
 
 It reports Central version / license, Central-DB availability, connected
-clusters (collection method + version skew), and — when the advanced layer is
-present — collection errors, Sensor↔Central connectivity, TLS-cert expiry,
+clusters (collection method + version skew), distinct node kernel versions, and
+— when the advanced layer is present — collection errors, Sensor↔Central
+connectivity (including x509 CA-rotation breakage), TLS-cert expiry,
 Sensor/Central heap and goroutine counts, Collector status, Scanner V4
-readiness / restart churn, admin events, and OOMKilled / restarting pods. The heap check reads each component's pod memory
+readiness / restart churn, Central `db-init` permission/startup failures, the
+Sensor duplicate-IP warning count, admin events, and OOMKilled / restarting
+pods. The heap check reads each component's pod memory
 limit from its manifest and warns on the real percentage used (`WARN` ≥75%,
 `FAIL` ≥90%). When the `vuln-report/` layer is present it also summarizes
 image-scan CVEs (flagging images with fixable critical / important findings) and

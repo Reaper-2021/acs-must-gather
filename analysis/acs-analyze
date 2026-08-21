@@ -393,6 +393,7 @@ def check_connectivity(adv, rep):
     bad_markers = [
         ("not trusted", "cert/CA mismatch"),
         ("invalid trust info signature", "cert/CA mismatch"),
+        ("certificate signed by unknown authority", "x509 CA mismatch (CA rotation?)"),
         ("different Central installation", "Sensor points at a re-installed Central"),
         ("checking central status over HTTP failed", "network/DNS/Central-down"),
         ("offline mode", "Sensor lost Central and is buffering"),
@@ -620,6 +621,91 @@ def check_scanner_v4(adv, rep):
             rep.add(f"Scanner V4 [{ns}]", WARN, detail + " - restart churn")
         else:
             rep.add(f"Scanner V4 [{ns}]", OK, detail)
+
+
+def check_db_init(adv, rep):
+    """Central db-init init-container failures (permission / startup errors).
+
+    The db-init log is captured by advanced-acs-diagnostics/platform/<ns>/. A
+    permission error on /var/lib/stackrox is the classic db-init CrashLoopBackOff
+    (KCS 7035376); a panic / fatal is a startup failure worth surfacing.
+    """
+    if not adv:
+        return
+    logs = glob.glob(os.path.join(adv, "platform", "*", "central-db-init*.log"))
+    if not logs:
+        return  # not collected (old bundle / Central healthy) - stay quiet.
+    perm_re = re.compile(r"permission denied|operation not permitted|"
+                         r"cannot create|mkdir.*denied|read-only file system",
+                         re.IGNORECASE)
+    fatal_re = re.compile(r"\bpanic\b|\bfatal\b|nil pointer|"
+                          r"runtime error|dereference", re.IGNORECASE)
+    for path in sorted(logs):
+        ns = os.path.basename(os.path.dirname(path))
+        prev = " (previous)" if path.endswith("-previous.log") else ""
+        txt = read_text(path) or ""
+        label = f"Central db-init [{ns}]{prev}"
+        perm = [ln.strip() for ln in txt.splitlines() if perm_re.search(ln)]
+        fatal = [ln.strip() for ln in txt.splitlines() if fatal_re.search(ln)]
+        if perm:
+            rep.add(label, FAIL,
+                    "permission error on the Central data volume "
+                    "(db-init CrashLoopBackOff)", perm[:6])
+        elif fatal:
+            rep.add(label, FAIL, "fatal error during db-init startup", fatal[:6])
+        else:
+            rep.add(label, OK, "no permission/startup errors in db-init log")
+
+
+def check_sensor_ip_dup(adv, rep):
+    """Sensor duplicate-IP warning frequency (memory-growth signature)."""
+    if not adv:
+        return
+    files = glob.glob(os.path.join(adv, "secured-cluster-local", "*",
+                                   "sensor-ip-duplication.txt"))
+    if not files:
+        return
+    for path in sorted(files):
+        ns = os.path.basename(os.path.dirname(path))
+        txt = read_text(path) or ""
+        m = re.search(r"(?m)^count:\s*(\d+)", txt)
+        if not m:
+            continue
+        count = int(m.group(1))
+        label = f"Sensor duplicate IPs [{ns}]"
+        if count >= 1000:
+            rep.add(label, WARN,
+                    f"{count} 'belongs to 2 or more deployments' warnings "
+                    "- known Sensor memory-growth driver")
+        elif count > 0:
+            rep.add(label, INFO,
+                    f"{count} duplicate-IP warning(s)")
+        else:
+            rep.add(label, OK, "no duplicate-IP warnings")
+
+
+def check_node_kernels(bundle, rep):
+    """Distinct node OS/kernel versions - context for Collector driver issues."""
+    path = os.path.join(bundle, "cluster-scoped-resources", "core",
+                        "node-kernel-matrix.txt")
+    txt = read_text(path)
+    if not txt:
+        return  # not collected - stay quiet.
+    kernels = set()
+    nodes = 0
+    for line in txt.splitlines():
+        parts = line.split()
+        # Header line starts with "NAME"; data rows have >= 3 columns.
+        if not parts or parts[0] in ("NAME", ""):
+            continue
+        nodes += 1
+        if len(parts) >= 3:
+            kernels.add(parts[2])
+    if nodes == 0:
+        return
+    detail = f"{nodes} node(s), {len(kernels)} distinct kernel version(s)"
+    lines = sorted(kernels)[:12] if len(kernels) > 1 else []
+    rep.add("Node kernels", INFO, detail, lines)
 
 
 # ---------------------------------------------------------------------------
@@ -990,7 +1076,10 @@ def main(argv=None):
     check_heap(adv, bundle, rep)
     check_goroutines(adv, bundle, rep)
     check_collector(adv, rep)
+    check_node_kernels(bundle, rep)
     check_scanner_v4(adv, rep)
+    check_db_init(adv, rep)
+    check_sensor_ip_dup(adv, rep)
     check_image_cves(adv, rep, image_filter=args.image)
     check_violations(adv, rep)
     check_admin_events(adv, rep)

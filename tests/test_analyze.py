@@ -374,5 +374,100 @@ class ViolationsTest(unittest.TestCase):
             self.assertEqual(rep.results, [])
 
 
+class DbInitTest(unittest.TestCase):
+    def _run(self, log_name, content):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            _write(os.path.join(adv, "platform", "stackrox", log_name), content)
+            rep = ACS.Report()
+            ACS.check_db_init(adv, rep)
+            return rep.results
+
+    def test_permission_error_fails(self):
+        results = self._run("central-db-init.log",
+                            "starting db-init\nmkdir /var/lib/stackrox/.db-init: "
+                            "permission denied\n")
+        self.assertEqual(results[0].status, ACS.FAIL)
+        self.assertIn("permission error", results[0].detail)
+
+    def test_fatal_error_fails(self):
+        results = self._run("central-db-init.log",
+                            "panic: runtime error: invalid memory address or nil "
+                            "pointer dereference\n")
+        self.assertEqual(results[0].status, ACS.FAIL)
+
+    def test_clean_db_init_ok(self):
+        results = self._run("central-db-init.log",
+                            "db-init completed successfully\n")
+        self.assertEqual(results[0].status, ACS.OK)
+
+    def test_absent_is_silent(self):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            os.makedirs(adv)
+            rep = ACS.Report()
+            ACS.check_db_init(adv, rep)
+            self.assertEqual(rep.results, [])
+
+
+class SensorIpDupTest(unittest.TestCase):
+    def _run(self, body):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            _write(os.path.join(adv, "secured-cluster-local", "stackrox",
+                                "sensor-ip-duplication.txt"), body)
+            rep = ACS.Report()
+            ACS.check_sensor_ip_dup(adv, rep)
+            return rep.results
+
+    def test_high_count_warns(self):
+        results = self._run("# header\ncount: 5000\n")
+        self.assertEqual(results[0].status, ACS.WARN)
+        self.assertIn("5000", results[0].detail)
+
+    def test_low_count_info(self):
+        results = self._run("count: 3\n")
+        self.assertEqual(results[0].status, ACS.INFO)
+
+    def test_zero_count_ok(self):
+        results = self._run("count: 0\n")
+        self.assertEqual(results[0].status, ACS.OK)
+
+    def test_absent_is_silent(self):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            os.makedirs(adv)
+            rep = ACS.Report()
+            ACS.check_sensor_ip_dup(adv, rep)
+            self.assertEqual(rep.results, [])
+
+
+class NodeKernelsTest(unittest.TestCase):
+    def _run(self, matrix):
+        with tempfile.TemporaryDirectory() as d:
+            core = os.path.join(d, "cluster-scoped-resources", "core")
+            _write(os.path.join(core, "node-kernel-matrix.txt"), matrix)
+            rep = ACS.Report()
+            ACS.check_node_kernels(d, rep)
+            return rep.results
+
+    def test_distinct_kernels_reported(self):
+        matrix = textwrap.dedent("""\
+            NAME     OS-IMAGE   KERNEL-VERSION       RUNTIME
+            node-a   RHCOS      5.14.0-100.el9.x86_64  cri-o
+            node-b   RHCOS      5.14.0-200.el9.x86_64  cri-o
+            """)
+        results = self._run(matrix)
+        self.assertEqual(results[0].status, ACS.INFO)
+        self.assertIn("2 node(s)", results[0].detail)
+        self.assertIn("2 distinct kernel", results[0].detail)
+
+    def test_absent_is_silent(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = ACS.Report()
+            ACS.check_node_kernels(d, rep)
+            self.assertEqual(rep.results, [])
+
+
 if __name__ == "__main__":
     unittest.main()

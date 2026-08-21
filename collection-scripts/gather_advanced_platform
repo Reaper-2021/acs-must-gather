@@ -1,0 +1,103 @@
+#!/bin/bash
+
+# ACS Must-Gather - Advanced: Platform Scoping, Storage & Startup Forensics
+#
+# Targeted artifacts that map to recurring RHACS support cases but that a plain
+# `oc adm inspect` does not surface cleanly:
+#   - the db-init init-container log (permission / startup failures that are lost
+#     once the Central pod is recreated and easy to miss inside inspect output)
+#   - Central-DB Postgres migration / lock / slow-upgrade markers
+#   - `oc describe pvc` (binding events the PVC yaml alone does not show)
+#   - the OpenShift internal-registry CA configmap (image-registry-certificates),
+#     which lives outside the ACS namespaces and is needed to debug
+#     "x509: certificate signed by unknown authority" after a CA rotation
+#   - a single chronologically-sorted events file per namespace (timeline)
+#
+# Best-effort and isolated like every advanced sub-collector: any failure writes
+# a .error file and the script still exits 0.
+
+# shellcheck source=collection-scripts/common.sh
+source /usr/bin/common.sh
+
+log_msg "--- gather_advanced_platform: starting ---"
+
+OUT_DIR="${MUST_GATHER_DIR}/advanced-acs-diagnostics/platform"
+mkdir -p "${OUT_DIR}"
+
+ADV_TIMEOUT="${ADV_PLATFORM_TIMEOUT:-${DIAG_TIMEOUT:-30}}"
+LOG_ARGS="$(get_log_collection_args)"
+
+# Postgres migration / lock / slow-upgrade markers for the central-db log.
+DB_MARKERS='migrat|lock|deadlock|timeout|slow|panic|FATAL|could not|out of memory|restore|upgrade|vacuum|checkpoint'
+
+# ---------- OpenShift internal-registry CA (cluster-scoped-ish) ----------
+# Used to debug Sensor/Collector "certificate signed by unknown authority" when
+# talking to the internal registry after a CA rotation (public certs only).
+if oc get configmap image-registry-certificates -n openshift-image-registry &>/dev/null 2>&1; then
+    log_msg "Collecting image-registry-certificates configmap..."
+    oc get configmap image-registry-certificates -n openshift-image-registry -o yaml \
+        > "${OUT_DIR}/image-registry-certificates.yaml" 2>/dev/null \
+        || echo "failed to read image-registry-certificates" \
+            > "${OUT_DIR}/image-registry-certificates.yaml.error"
+else
+    echo "configmap image-registry-certificates not found in openshift-image-registry (non-OpenShift cluster, or no internal registry)." \
+        > "${OUT_DIR}/image-registry-certificates.yaml.skipped"
+fi
+
+# ---------- Per-namespace: events timeline, PVC describe, Central startup ----------
+while IFS= read -r ns; do
+    [[ -z "${ns}" ]] && continue
+    ns_dir="${OUT_DIR}/${ns}"
+    mkdir -p "${ns_dir}"
+
+    # Chronologically-sorted events (oc adm inspect writes events unsorted).
+    oc get events -n "${ns}" --sort-by='.metadata.creationTimestamp' \
+        > "${ns_dir}/events-sorted.txt" 2>/dev/null || true
+
+    # `oc describe pvc` per PVC - surfaces binding/provisioning events that the
+    # PVC yaml (collected by inspect) does not spell out.
+    while IFS= read -r pvc; do
+        [[ -z "${pvc}" ]] && continue
+        pvc_name="${pvc##*/}"
+        oc describe "pvc/${pvc_name}" -n "${ns}" \
+            > "${ns_dir}/pvc-${pvc_name}-describe.txt" 2>/dev/null || true
+    done < <(oc get pvc -n "${ns}" -o name 2>/dev/null)
+
+    # Central startup forensics (only where Central is deployed).
+    if resource_exists "deployment/central" "${ns}"; then
+        # db-init init-container log: current, then previous if the pod restarted.
+        # shellcheck disable=SC2086
+        if ! timeout "${ADV_TIMEOUT}" \
+            oc logs -n "${ns}" deployment/central -c db-init ${LOG_ARGS} \
+            > "${ns_dir}/central-db-init.log" 2>/dev/null || [[ ! -s "${ns_dir}/central-db-init.log" ]]; then
+            rm -f "${ns_dir}/central-db-init.log"
+        fi
+        # shellcheck disable=SC2086
+        timeout "${ADV_TIMEOUT}" \
+            oc logs -n "${ns}" deployment/central -c db-init --previous ${LOG_ARGS} \
+            > "${ns_dir}/central-db-init-previous.log" 2>/dev/null \
+            || rm -f "${ns_dir}/central-db-init-previous.log"
+    fi
+
+    # Central-DB migration / lock / slow-upgrade markers.
+    db_res=""
+    if resource_exists "statefulset/central-db" "${ns}"; then
+        db_res="statefulset/central-db"
+    elif resource_exists "deployment/central-db" "${ns}"; then
+        db_res="deployment/central-db"
+    fi
+    if [[ -n "${db_res}" ]]; then
+        {
+            echo "# Central-DB migration / lock / slow-upgrade markers"
+            echo "# namespace: ${ns}  resource: ${db_res}"
+            echo "# generated: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo
+            # shellcheck disable=SC2086
+            oc logs -n "${ns}" "${db_res}" --tail=-1 ${LOG_ARGS} 2>/dev/null \
+                | grep -niE "${DB_MARKERS}" | tail -200 \
+                || echo "(no migration/lock/upgrade markers found)"
+        } > "${ns_dir}/central-db-migration-markers.txt" 2>/dev/null || true
+    fi
+done <<< "${ACS_NAMESPACES}"
+
+log_msg "--- gather_advanced_platform: complete ---"
