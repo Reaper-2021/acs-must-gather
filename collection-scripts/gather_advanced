@@ -20,6 +20,9 @@
 #   gather_advanced_forensics       - crash and upgrade forensics
 #                                     (previous-container logs, pod describe,
 #                                     sensor-upgrader, administration events).
+#   gather_advanced_scanner_v4      - Central-independent Scanner V4 health
+#                                     (indexer/matcher readiness + metrics,
+#                                     pod state, vuln-updater log markers).
 
 # shellcheck source=collection-scripts/common.sh
 source /usr/bin/common.sh
@@ -41,6 +44,9 @@ mkdir -p "${ADVANCED_DIR}"
     echo "  tls-certs/              - X.509 expiry report for RHACS service certs."
     echo "  crash-upgrade-forensics/- previous-container logs, pod describe,"
     echo "                            sensor-upgrader, and administration events."
+    echo "  scanner-v4/             - Central-independent Scanner V4 health"
+    echo "                            (indexer/matcher readiness + metrics,"
+    echo "                            pod state, vuln-updater log markers)."
 } > "${ADVANCED_DIR}/README.txt"
 
 PIDS=()
@@ -61,6 +67,12 @@ if [[ "${GATHER_ADV_FORENSICS:-true}" == "true" ]]; then
     /usr/bin/gather_advanced_forensics &
     PIDS+=($!)
     log_msg "Launched gather_advanced_forensics (PID: ${PIDS[-1]})"
+fi
+
+if [[ "${GATHER_ADV_SCANNER_V4:-true}" == "true" ]]; then
+    /usr/bin/gather_advanced_scanner_v4 &
+    PIDS+=($!)
+    log_msg "Launched gather_advanced_scanner_v4 (PID: ${PIDS[-1]})"
 fi
 
 for pid in "${PIDS[@]}"; do

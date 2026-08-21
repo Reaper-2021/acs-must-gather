@@ -159,5 +159,54 @@ class MemParsingTest(unittest.TestCase):
         self.assertIsNone(ACS.container_mem_limit(manifest, "nope"))
 
 
+class ScannerV4Test(unittest.TestCase):
+    def _run_check(self, status_text):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            _write(os.path.join(adv, "scanner-v4", "stackrox",
+                                "scanner-v4-status.txt"), status_text)
+            rep = ACS.Report()
+            ACS.check_scanner_v4(adv, rep)
+            return rep.results
+
+    def test_healthy_scanner_v4(self):
+        text = textwrap.dedent("""\
+            # Scanner V4 pod status
+            === scanner-v4-indexer-abc  [scanner-v4-indexer] ===
+              phase: Running
+              ready: true
+              restarts: 0
+              lastState:
+            === scanner-v4-matcher-def  [scanner-v4-matcher] ===
+              phase: Running
+              ready: true
+              restarts: 1
+              lastState:
+            """)
+        results = self._run_check(text)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].status, ACS.OK)
+
+    def test_not_ready_scanner_v4(self):
+        text = textwrap.dedent("""\
+            === scanner-v4-matcher-def  [scanner-v4-matcher] ===
+              phase: Running
+              ready: false
+              restarts: 9
+              lastState: terminated
+            """)
+        results = self._run_check(text)
+        self.assertEqual(results[0].status, ACS.WARN)
+        self.assertIn("not ready", results[0].detail)
+
+    def test_absent_scanner_v4_is_silent(self):
+        with tempfile.TemporaryDirectory() as d:
+            adv = os.path.join(d, "advanced-acs-diagnostics")
+            os.makedirs(adv)
+            rep = ACS.Report()
+            ACS.check_scanner_v4(adv, rep)
+            self.assertEqual(rep.results, [])
+
+
 if __name__ == "__main__":
     unittest.main()
