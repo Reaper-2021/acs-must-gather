@@ -384,22 +384,38 @@ class DbInitTest(unittest.TestCase):
             return rep.results
 
     def test_permission_error_fails(self):
-        results = self._run("central-db-init.log",
+        results = self._run("central-db-init-init-db.log",
                             "starting db-init\nmkdir /var/lib/stackrox/.db-init: "
                             "permission denied\n")
         self.assertEqual(results[0].status, ACS.FAIL)
         self.assertIn("permission error", results[0].detail)
+        self.assertIn("central-db data volume", results[0].detail)
 
     def test_fatal_error_fails(self):
-        results = self._run("central-db-init.log",
+        results = self._run("central-db-init-init-db.log",
                             "panic: runtime error: invalid memory address or nil "
                             "pointer dereference\n")
         self.assertEqual(results[0].status, ACS.FAIL)
 
     def test_clean_db_init_ok(self):
-        results = self._run("central-db-init.log",
+        results = self._run("central-db-init-init-db.log",
                             "db-init completed successfully\n")
         self.assertEqual(results[0].status, ACS.OK)
+
+    def test_scanner_db_permission_error_fails(self):
+        # scanner-db and scanner-v4-db share the same init-db container and must
+        # be triaged the same way; the label carries the DB base name.
+        results = self._run("scanner-db-init-init-db.log",
+                            "initdb: could not create directory: permission denied\n")
+        self.assertEqual(results[0].status, ACS.FAIL)
+        self.assertIn("scanner-db init", results[0].name)
+        self.assertIn("scanner-db data volume", results[0].detail)
+
+    def test_scanner_v4_db_clean_ok(self):
+        results = self._run("scanner-v4-db-init-init-db.log",
+                            "initdb complete\n")
+        self.assertEqual(results[0].status, ACS.OK)
+        self.assertIn("scanner-v4-db init", results[0].name)
 
     def test_absent_is_silent(self):
         with tempfile.TemporaryDirectory() as d:

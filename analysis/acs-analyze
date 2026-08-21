@@ -624,19 +624,23 @@ def check_scanner_v4(adv, rep):
 
 
 def check_db_init(adv, rep):
-    """Central db-init init-container failures (permission / startup errors).
+    """DB init-container failures (permission / startup errors).
 
-    The db-init log is captured by advanced-acs-diagnostics/platform/<ns>/. A
-    permission error on /var/lib/stackrox is the classic db-init CrashLoopBackOff
-    (KCS 7035376); a panic / fatal is a startup failure worth surfacing.
+    Every RHACS PostgreSQL database (central-db, scanner-db, scanner-v4-db)
+    shares the same init-db init container that prepares its data directory; the
+    logs are captured by advanced-acs-diagnostics/platform/<ns>/ as
+    <db>-init-<container>.log. A permission error on the data volume is the
+    classic db-init CrashLoopBackOff (KCS 7035376); a panic / fatal is a startup
+    failure worth surfacing.
     """
     if not adv:
         return
-    # File names vary by version - the db-init step may be an init container named
-    # init-db on central-db (central-db-init-init-db.log) or db-init on central.
-    logs = glob.glob(os.path.join(adv, "platform", "*", "central*init*.log"))
+    # File names are <db>-init-<container>.log (e.g. central-db-init-init-db.log,
+    # scanner-db-init-init-db.log). The db base and container name both vary by
+    # version, so match any init log rather than hardcoding.
+    logs = glob.glob(os.path.join(adv, "platform", "*", "*init*.log"))
     if not logs:
-        return  # not collected (old bundle / Central healthy) - stay quiet.
+        return  # not collected (old bundle / DBs healthy) - stay quiet.
     perm_re = re.compile(r"permission denied|operation not permitted|"
                          r"cannot create|mkdir.*denied|read-only file system",
                          re.IGNORECASE)
@@ -645,14 +649,20 @@ def check_db_init(adv, rep):
     for path in sorted(logs):
         ns = os.path.basename(os.path.dirname(path))
         prev = " (previous)" if path.endswith("-previous.log") else ""
+        fname = os.path.basename(path)
+        stem = fname[:-len(".log")] if fname.endswith(".log") else fname
+        # Recover the DB base (central-db / scanner-db / scanner-v4-db / central)
+        # from the "<base>-init-<container>" file stem. None of the bases contain
+        # "-init", so splitting on it isolates the base reliably.
+        comp = stem.split("-init")[0] or "db"
         txt = read_text(path) or ""
-        label = f"Central init [{ns}]{prev}"
+        label = f"{comp} init [{ns}]{prev}"
         perm = [ln.strip() for ln in txt.splitlines() if perm_re.search(ln)]
         fatal = [ln.strip() for ln in txt.splitlines() if fatal_re.search(ln)]
         if perm:
             rep.add(label, FAIL,
-                    "permission error on the Central data volume "
-                    "(db-init CrashLoopBackOff)", perm[:6])
+                    f"permission error on the {comp} data volume "
+                    "(init-db CrashLoopBackOff)", perm[:6])
         elif fatal:
             rep.add(label, FAIL, "fatal error during db-init startup", fatal[:6])
         else:

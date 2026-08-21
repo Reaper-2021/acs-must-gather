@@ -32,6 +32,11 @@ LOG_ARGS="$(get_log_collection_args)"
 # file carries signal, not noise.
 DB_MARKERS='migrat|deadlock|lock wait|lock timeout|lock is not available|canceling statement|timeout|slow|panic|FATAL|could not|out of memory|restore|rollback|upgrade'
 
+# RHACS PostgreSQL databases that share the init-db data-dir prep init container.
+# All are subject to the same data-volume permission CrashLoopBackOff, so the
+# same forensics (init-container logs + migration/lock markers) apply to each.
+DB_BASES="central-db scanner-db scanner-v4-db"
+
 # collect_init_logs <ns> <resource> <out_prefix>
 # Collect current + previous logs for every init container of <resource>. The
 # init container name and location vary by version (e.g. init-db on central-db),
@@ -51,6 +56,17 @@ collect_init_logs() {
             > "${prefix}-${c}-previous.log" 2>/dev/null
         [[ -s "${prefix}-${c}-previous.log" ]] || rm -f "${prefix}-${c}-previous.log"
     done
+}
+
+# resolve_db_res <ns> <base>: echo statefulset/<base> or deployment/<base>,
+# whichever exists (installs vary), or nothing.
+resolve_db_res() {
+    local ns="$1" base="$2"
+    if resource_exists "statefulset/${base}" "${ns}"; then
+        echo "statefulset/${base}"
+    elif resource_exists "deployment/${base}" "${ns}"; then
+        echo "deployment/${base}"
+    fi
 }
 
 # ---------- OpenShift internal-registry CA (cluster-scoped-ish) ----------
@@ -86,28 +102,25 @@ while IFS= read -r ns; do
             > "${ns_dir}/pvc-${pvc_name}-describe.txt" 2>/dev/null || true
     done < <(oc get pvc -n "${ns}" -o name 2>/dev/null)
 
-    # Central-DB resource (statefulset in most installs, deployment in some).
-    db_res=""
-    if resource_exists "statefulset/central-db" "${ns}"; then
-        db_res="statefulset/central-db"
-    elif resource_exists "deployment/central-db" "${ns}"; then
-        db_res="deployment/central-db"
-    fi
-
-    # Init-container logs (startup / permission forensics). The db-init step that
-    # prepares /var/lib/stackrox runs as an init container (name/location vary by
-    # version, e.g. init-db on central-db), so collect every init container of
-    # both Central and Central-DB. Files are named central-db-init-<container>.log
-    # so the analyzer can spot a data-volume permission CrashLoopBackOff.
+    # Central deployment init containers (older versions run db-init here).
+    # Files are named central-init-<container>.log.
     if resource_exists "deployment/central" "${ns}"; then
         collect_init_logs "${ns}" "deployment/central" "${ns_dir}/central-init"
     fi
-    if [[ -n "${db_res}" ]]; then
-        collect_init_logs "${ns}" "${db_res}" "${ns_dir}/central-db-init"
-    fi
-    if [[ -n "${db_res}" ]]; then
+
+    # Every RHACS PostgreSQL DB (central-db, scanner-db, scanner-v4-db) runs the
+    # same init-db init container that prepares its data directory - a permission
+    # error there is the classic CrashLoopBackOff, and the log is lost once the
+    # pod is recreated. Collect init-container logs (startup / permission
+    # forensics) and Postgres migration / lock / slow-upgrade markers for each.
+    # Files are named <db>-init-<container>.log and <db>-migration-markers.txt so
+    # the analyzer can spot a data-volume permission failure on any DB.
+    for db_base in ${DB_BASES}; do
+        db_res="$(resolve_db_res "${ns}" "${db_base}")"
+        [[ -z "${db_res}" ]] && continue
+        collect_init_logs "${ns}" "${db_res}" "${ns_dir}/${db_base}-init"
         {
-            echo "# Central-DB migration / lock / slow-upgrade markers"
+            echo "# ${db_base} migration / lock / slow-upgrade markers"
             echo "# namespace: ${ns}  resource: ${db_res}"
             echo "# generated: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
             echo
@@ -115,8 +128,8 @@ while IFS= read -r ns; do
             oc logs -n "${ns}" "${db_res}" --tail=-1 ${LOG_ARGS} 2>/dev/null \
                 | grep -niE "${DB_MARKERS}" | tail -200 \
                 || echo "(no migration/lock/upgrade markers found)"
-        } > "${ns_dir}/central-db-migration-markers.txt" 2>/dev/null || true
-    fi
+        } > "${ns_dir}/${db_base}-migration-markers.txt" 2>/dev/null || true
+    done
 done <<< "${ACS_NAMESPACES}"
 
 log_msg "--- gather_advanced_platform: complete ---"
