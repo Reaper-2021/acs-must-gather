@@ -1,0 +1,721 @@
+#!/usr/bin/env python3
+"""acs-analyze - health report for an ACS must-gather bundle.
+
+Reads an extracted acs-must-gather (produced by the acs-must-gather image) and
+prints a health report that automates the "is this cluster healthy?" checklist
+from the README. It runs entirely offline against the extracted files - it never
+contacts a cluster.
+
+Usage:
+    acs-analyze [PATH]
+
+PATH may point at the must-gather root, the image sub-directory
+(quay-io-...-acs-must-gather-sha256-...), or the directory is auto-discovered
+from the current directory when omitted.
+
+Exit codes:
+    0  no failing checks (warnings are allowed)
+    1  at least one check FAILED
+    2  usage / could not locate a bundle
+
+Requires: python3 (stdlib only). `go` is used, when present, to read the
+sensor/central heap profiles via `go tool pprof`; without it those checks SKIP.
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+# ---------------------------------------------------------------------------
+# Result model
+# ---------------------------------------------------------------------------
+
+OK, WARN, FAIL, SKIP, INFO = "OK", "WARN", "FAIL", "SKIP", "INFO"
+
+# Ordering / severity so the summary can rank the worst first.
+_RANK = {FAIL: 0, WARN: 1, SKIP: 2, INFO: 3, OK: 4}
+
+
+class Result:
+    def __init__(self, name, status, detail="", lines=None):
+        self.name = name
+        self.status = status
+        self.detail = detail
+        self.lines = lines or []  # extra indented lines
+
+
+class Report:
+    def __init__(self):
+        self.results = []
+
+    def add(self, name, status, detail="", lines=None):
+        self.results.append(Result(name, status, detail, lines))
+        return self.results[-1]
+
+    def has_failures(self):
+        return any(r.status == FAIL for r in self.results)
+
+
+# ---------------------------------------------------------------------------
+# Terminal colouring
+# ---------------------------------------------------------------------------
+
+def _use_color():
+    if os.environ.get("NO_COLOR"):
+        return False
+    return sys.stdout.isatty()
+
+
+_COLOR = _use_color()
+_CODES = {
+    OK: "\033[32m",     # green
+    WARN: "\033[33m",   # yellow
+    FAIL: "\033[31m",   # red
+    SKIP: "\033[90m",   # grey
+    INFO: "\033[36m",   # cyan
+}
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+
+
+def _tag(status):
+    label = f"[{status:>4}]"
+    if _COLOR and status in _CODES:
+        return f"{_CODES[status]}{label}{_RESET}"
+    return label
+
+
+def _bold(s):
+    return f"{_BOLD}{s}{_RESET}" if _COLOR else s
+
+
+# ---------------------------------------------------------------------------
+# Bundle discovery + small helpers
+# ---------------------------------------------------------------------------
+
+# Sub-directories that mark a must-gather image directory.
+_MARKERS = (
+    "acs-diagnostics",
+    "acs-diagnostic-bundle",
+    "acs-debug-dump",
+    "advanced-acs-diagnostics",
+    "namespaces",
+)
+
+
+def _looks_like_bundle(path):
+    return any(os.path.isdir(os.path.join(path, m)) for m in _MARKERS)
+
+
+def discover_bundle(start):
+    """Return the image sub-directory that holds the must-gather data."""
+    start = os.path.abspath(start)
+    if os.path.isfile(start):
+        start = os.path.dirname(start)
+    if _looks_like_bundle(start):
+        return start
+    # Look one or two levels down (must-gather.local.XXXX/quay-.../).
+    for depth in ("*", os.path.join("*", "*")):
+        for cand in sorted(glob.glob(os.path.join(start, depth))):
+            if os.path.isdir(cand) and _looks_like_bundle(cand):
+                return cand
+    return None
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def read_text(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def first_existing(*paths):
+    for p in paths:
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
+def human_bytes(n):
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return str(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < 1024.0:
+            return f"{n:.1f}{unit}"
+        n /= 1024.0
+    return f"{n:.1f}PB"
+
+
+# Kubernetes quantity suffixes -> multiplier (binary Ki/Mi/... and decimal k/M/...).
+_QTY = {
+    "": 1, "k": 1000, "K": 1000, "M": 1000**2, "G": 1000**3,
+    "T": 1000**4, "P": 1000**5,
+    "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4, "Pi": 1024**5,
+}
+
+
+def mem_to_bytes(s):
+    """Convert a Kubernetes memory quantity (e.g. '4Gi', '512Mi', '2000000') to bytes."""
+    m = re.match(r'^\s*"?(\d+(?:\.\d+)?)\s*([EPTGMK]i?|[kKMGTP]?)"?\s*$', str(s))
+    if not m:
+        return None
+    val, suffix = float(m.group(1)), m.group(2)
+    mult = _QTY.get(suffix)
+    return int(val * mult) if mult else None
+
+
+def container_mem_limit(yaml_text, container):
+    """Best-effort: memory limit (bytes) for the named container in a pod manifest.
+
+    Stdlib only, so this is an indentation-aware scan rather than a real YAML
+    parse. `oc get -o yaml` sorts keys alphabetically, so a container list item
+    starts with `- <firstkey>:` (e.g. `- command:`) and carries `name:` as a
+    plain key. We split the `containers:` list into per-item blocks, pick the
+    block whose `name:` matches, then read its `limits:`/`memory:`.
+    """
+    lines = yaml_text.splitlines()
+    n = len(lines)
+
+    # Locate the spec-level `containers:` key.
+    cidx = cindent = None
+    for i, ln in enumerate(lines):
+        m = re.match(r'^(\s*)containers:\s*$', ln)
+        if m:
+            cidx, cindent = i, len(m.group(1))
+            break
+    if cidx is None:
+        return None
+
+    # Determine the list-item ("- ") indent from the first item after the key.
+    dash = None
+    for ln in lines[cidx + 1:]:
+        if not ln.strip():
+            continue
+        m = re.match(r'^(\s*)-\s', ln)
+        if m and len(m.group(1)) >= cindent:
+            dash = len(m.group(1))
+        break
+    if dash is None:
+        return None
+
+    # Split the list into per-item blocks.
+    blocks, cur = [], None
+    for ln in lines[cidx + 1:]:
+        if not ln.strip():
+            if cur is not None:
+                cur.append(ln)
+            continue
+        ind = len(ln) - len(ln.lstrip())
+        if ind == dash and re.match(r'^\s*-\s', ln):
+            if cur is not None:
+                blocks.append(cur)
+            cur = [ln]
+        elif ind > dash:
+            if cur is not None:
+                cur.append(ln)
+        else:
+            break  # dedented out of the containers list
+    if cur is not None:
+        blocks.append(cur)
+
+    for blk in blocks:
+        joined = "\n".join(blk)
+        # `name:` is usually a plain key, but may sit on the `- ` item line when
+        # it is the alphabetically-first key of the container.
+        if not re.search(rf'(?m)^\s*(?:-\s+)?name:\s*"?{re.escape(container)}"?\s*$',
+                         joined):
+            continue
+        in_limits = False
+        for bl in blk:
+            s = bl.strip()
+            if s.startswith("limits:"):
+                in_limits = True
+                continue
+            if s.startswith("requests:"):
+                in_limits = False
+                continue
+            if in_limits:
+                mm = re.match(r'^memory:\s*(.+)$', s)
+                if mm:
+                    return mem_to_bytes(mm.group(1))
+    return None
+
+
+def pod_mem_limit(bundle, ns, name_glob, container, exclude=()):
+    """Find a pod matching name_glob under namespaces/<ns>/ and return its
+    container memory limit in bytes, or None."""
+    base = os.path.join(bundle, "namespaces", ns if ns else "*", "pods",
+                        name_glob, "*.yaml")
+    for yml in sorted(glob.glob(base)):
+        d = os.path.basename(os.path.dirname(yml))
+        if any(d.startswith(x) for x in exclude):
+            continue
+        txt = read_text(yml)
+        if not txt:
+            continue
+        lim = container_mem_limit(txt, container)
+        if lim:
+            return lim
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Checks
+# ---------------------------------------------------------------------------
+
+def check_versions(bundle, rep):
+    """Central version, license status, and Central<->Sensor version skew."""
+    meta = read_json(os.path.join(bundle, "acs-diagnostics", "central-metadata.json"))
+    versions = read_json(os.path.join(bundle, "acs-diagnostic-bundle", "versions.json")) \
+        or read_json(os.path.join(bundle, "acs-debug-dump", "versions.json"))
+
+    central_ver = None
+    lines = []
+    if meta:
+        central_ver = meta.get("version")
+        lines.append(f"Central: {central_ver}  (flavor={meta.get('buildFlavor')}, "
+                     f"release={meta.get('releaseBuild')})")
+    if versions:
+        central_ver = central_ver or versions.get("MainVersion")
+        lines.append(f"Main={versions.get('MainVersion')}  "
+                     f"Collector={versions.get('CollectorVersion')}  "
+                     f"Scanner={versions.get('ScannerVersion')}  "
+                     f"DB={versions.get('Database')} {versions.get('DatabaseServerVersion')}")
+    if not lines:
+        rep.add("Versions", SKIP, "no central-metadata.json / versions.json found")
+        return central_ver
+
+    # License gate.
+    lic = (meta or {}).get("licenseStatus")
+    if lic and lic != "VALID":
+        rep.add("License", FAIL, f"Central license status is {lic}")
+    elif lic:
+        rep.add("License", OK, "license VALID")
+
+    rep.add("Versions", OK if central_ver else INFO,
+            f"Central {central_ver}" if central_ver else "version data present",
+            lines)
+    return central_ver
+
+
+def check_central_db(bundle, rep):
+    st = read_json(os.path.join(bundle, "acs-diagnostics", "central-db-status.json"))
+    if st is None:
+        rep.add("Central DB", SKIP, "central-db-status.json not found")
+        return
+    if st.get("databaseAvailable") is True:
+        ext = " (external)" if st.get("databaseIsExternal") else ""
+        rep.add("Central DB", OK,
+                f"available - {st.get('databaseType')} {st.get('databaseVersion')}{ext}")
+    else:
+        rep.add("Central DB", FAIL, f"databaseAvailable={st.get('databaseAvailable')}")
+
+
+def check_clusters(bundle, rep, central_ver):
+    data = read_json(os.path.join(bundle, "acs-diagnostics", "central-clusters.json"))
+    if data is None:
+        rep.add("Secured Clusters", SKIP, "central-clusters.json not found")
+        return
+    clusters = data.get("clusters", []) if isinstance(data, dict) else []
+    if not clusters:
+        rep.add("Secured Clusters", WARN, "Central reports zero connected clusters")
+        return
+
+    lines = []
+    worst = OK
+    for c in clusters:
+        name = c.get("name", "?")
+        cm = c.get("collectionMethod", "?")
+        sver = (c.get("status") or {}).get("sensorVersion", "?")
+        note = ""
+        if cm not in ("CORE_BPF", "EBPF"):
+            worst = _worse(worst, WARN)
+            note += f"  collectionMethod={cm}(!)"
+        if central_ver and sver not in ("?", None) and sver != central_ver:
+            worst = _worse(worst, WARN)
+            note += f"  sensor {sver} != central {central_ver}(skew)"
+        lines.append(f"{name}: collector={cm}, sensor={sver}{note}")
+
+    rep.add("Secured Clusters", worst,
+            f"{len(clusters)} connected", lines)
+
+
+def check_upgrade_status(bundle, rep):
+    data = read_json(os.path.join(bundle, "acs-diagnostics", "central-upgrade-status.json"))
+    if data is None:
+        return  # optional, no noise
+    us = data.get("upgradeStatus", data) if isinstance(data, dict) else {}
+    rep.add("Upgrade status", INFO,
+            f"version={us.get('version')}, "
+            f"forceRollbackTo={us.get('forceRollbackTo')}")
+
+
+def check_collection_errors(adv, rep):
+    if not adv:
+        return
+    errs = []
+    for root, _dirs, files in os.walk(adv):
+        for f in files:
+            if f.endswith(".error"):
+                errs.append(os.path.relpath(os.path.join(root, f), adv))
+    if not errs:
+        rep.add("Collection errors", OK, "no .error files in advanced layer")
+    else:
+        rep.add("Collection errors", WARN,
+                f"{len(errs)} .error file(s) - some collectors could not reach a target",
+                sorted(errs)[:12])
+
+
+def check_connectivity(adv, rep):
+    if not adv:
+        return
+    matches = glob.glob(os.path.join(adv, "secured-cluster-local", "*",
+                                     "sensor-connectivity-summary.txt"))
+    if not matches:
+        rep.add("Sensor connectivity", SKIP, "no sensor-connectivity-summary.txt")
+        return
+    bad_markers = [
+        ("not trusted", "cert/CA mismatch"),
+        ("invalid trust info signature", "cert/CA mismatch"),
+        ("different Central installation", "Sensor points at a re-installed Central"),
+        ("checking central status over HTTP failed", "network/DNS/Central-down"),
+        ("offline mode", "Sensor lost Central and is buffering"),
+    ]
+    for path in matches:
+        ns = os.path.basename(os.path.dirname(path))
+        txt = read_text(path) or ""
+        established = "Established connection to Central" in txt
+        hits = sorted({label for marker, label in bad_markers
+                       if re.search(re.escape(marker), txt, re.IGNORECASE)})
+        if hits:
+            rep.add(f"Sensor connectivity [{ns}]", FAIL,
+                    "; ".join(hits))
+        elif established:
+            rep.add(f"Sensor connectivity [{ns}]", OK,
+                    "Established connection to Central")
+        else:
+            rep.add(f"Sensor connectivity [{ns}]", WARN,
+                    "no 'Established connection' line and no known error marker")
+
+
+def check_certs(adv, rep):
+    if not adv:
+        return
+    path = os.path.join(adv, "tls-certs", "cert-expiry-summary.txt")
+    txt = read_text(path)
+    if txt is None:
+        rep.add("TLS certs", SKIP, "cert-expiry-summary.txt not found")
+        return
+    expired, warning = [], []
+    current = "?"
+    for line in txt.splitlines():
+        m = re.match(r"=== (.+?) ===", line)
+        if m:
+            current = m.group(1)
+        elif line.startswith("status: EXPIRED"):
+            expired.append(current)
+        elif line.startswith("status: WARNING"):
+            warning.append(current)
+    if expired:
+        rep.add("TLS certs", FAIL,
+                f"{len(expired)} EXPIRED certificate(s)", expired[:12])
+    elif warning:
+        rep.add("TLS certs", WARN,
+                f"{len(warning)} cert(s) expire within 30 days", warning[:12])
+    elif "===" in txt:
+        rep.add("TLS certs", OK, "all decoded certs valid (>30d)")
+    else:
+        rep.add("TLS certs", SKIP, "no RHACS certificates were decoded")
+
+
+def _pprof_total_bytes(path):
+    """Return live-heap total bytes from a pprof heap profile, or None."""
+    go = shutil.which("go")
+    if not go or not os.path.exists(path):
+        return None
+    try:
+        out = subprocess.run(
+            [go, "tool", "pprof", "-inuse_space", "-top", "-nodecount=1", path],
+            capture_output=True, text=True, timeout=60,
+        ).stdout
+    except (subprocess.SubprocessError, OSError):
+        return None
+    # "Showing nodes accounting for 137.81MB, 72.86% of 189.15MB total"
+    m = re.search(r"of\s+([0-9.]+)([kKmMgG]?B)\s+total", out)
+    if not m:
+        return None
+    val, unit = float(m.group(1)), m.group(2).upper()
+    mult = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}.get(unit, 1)
+    return val * mult
+
+
+def check_heap(adv, bundle, rep):
+    go_present = shutil.which("go") is not None
+    # Sensor heap (advanced layer) is the most actionable.
+    sensor_heaps = glob.glob(os.path.join(adv or "", "secured-cluster-local", "*",
+                                          "sensor-heap.pb.gz")) if adv else []
+    central_heap = first_existing(
+        os.path.join(bundle, "acs-diagnostics", "central-heap-profile.pb.gz"),
+        os.path.join(bundle, "acs-diagnostic-bundle", "heap.pb.gz"),
+    )
+    # Each target: (label, path, ns, name_glob, container, exclude) so we can
+    # look up the owning pod's memory limit and warn on the real percentage.
+    targets = []
+    for p in sensor_heaps:
+        ns = os.path.basename(os.path.dirname(p))
+        targets.append((f"sensor heap [{ns}]", p, ns, "sensor-*", "sensor", ()))
+    if central_heap:
+        targets.append(("central heap", central_heap, None, "central-*",
+                        "central", ("central-db",)))
+    if not targets:
+        rep.add("Heap profiles", SKIP, "no heap profiles found")
+        return
+    if not go_present:
+        rep.add("Heap profiles", SKIP,
+                f"{len(targets)} heap profile(s) present but `go` not installed "
+                "(install Go to read them)")
+        return
+    for label, path, ns, name_glob, container, exclude in targets:
+        total = _pprof_total_bytes(path)
+        if total is None:
+            rep.add(label, SKIP, "could not parse pprof output")
+            continue
+        limit = pod_mem_limit(bundle, ns, name_glob, container, exclude)
+        if limit:
+            pct = total / limit
+            if pct >= 0.90:
+                status = FAIL
+            elif pct >= 0.75:
+                status = WARN
+            else:
+                status = OK
+            rep.add(label, status,
+                    f"live heap {human_bytes(total)} of {human_bytes(limit)} "
+                    f"limit ({pct:.0%})")
+        else:
+            # No limit in the manifest: report, warn only if very large.
+            status = WARN if total > 2 * 1024**3 else INFO
+            rep.add(label, status,
+                    f"live heap {human_bytes(total)} (no pod memory limit found)")
+
+
+def check_goroutines(adv, bundle, rep):
+    targets = []
+    if adv:
+        targets += [(f"sensor goroutines [{os.path.basename(os.path.dirname(p))}]", p)
+                    for p in glob.glob(os.path.join(
+                        adv, "secured-cluster-local", "*", "sensor-goroutine.txt"))]
+    central_gr = first_existing(
+        os.path.join(bundle, "acs-diagnostics", "central-goroutine-dump.txt"),
+        os.path.join(bundle, "acs-diagnostic-bundle", "goroutine.txt"),
+    )
+    if central_gr:
+        targets.append(("central goroutines", central_gr))
+    if not targets:
+        rep.add("Goroutines", SKIP, "no goroutine dumps found")
+        return
+    for label, path in targets:
+        txt = read_text(path) or ""
+        count = len(re.findall(r"(?m)^goroutine ", txt))
+        if count == 0:
+            rep.add(label, SKIP, "empty / unrecognised goroutine dump")
+        elif count > 20000:
+            rep.add(label, FAIL, f"{count} goroutines - likely a goroutine leak")
+        elif count > 8000:
+            rep.add(label, WARN, f"{count} goroutines - high, watch for a leak")
+        else:
+            rep.add(label, OK, f"{count} goroutines")
+
+
+def check_collector(adv, rep):
+    if not adv:
+        return
+    for path in glob.glob(os.path.join(adv, "secured-cluster-local", "*",
+                                       "collector-status.txt")):
+        ns = os.path.basename(os.path.dirname(path))
+        txt = read_text(path) or ""
+        pods = re.findall(r"=== (.+?) ===", txt)
+        methods = re.findall(r"collectionMethod:\s*(\S+)", txt)
+        restarts = [int(x) for x in re.findall(r"restartCount:\s*(\d+)", txt)]
+        laststates = re.findall(r"lastState:\s*(\S+)", txt)
+        bad_method = [m for m in methods if m not in ("CORE_BPF", "EBPF")]
+        max_restart = max(restarts) if restarts else 0
+        oom = any("OOM" in s or "Terminated" in s for s in laststates)
+        detail = f"{len(pods)} collector pod(s), method(s)={sorted(set(methods)) or '?'}, " \
+                 f"max restarts={max_restart}"
+        if oom or bad_method:
+            rep.add(f"Collector [{ns}]", WARN, detail)
+        elif max_restart > 5:
+            rep.add(f"Collector [{ns}]", WARN, detail + " - restart churn")
+        else:
+            rep.add(f"Collector [{ns}]", OK, detail)
+
+
+def check_admin_events(adv, rep):
+    if not adv:
+        return
+    path = os.path.join(adv, "crash-upgrade-forensics", "administration-events.json")
+    data = read_json(path)
+    if data is None:
+        return  # best-effort; absence is normal
+    events = data.get("events", data) if isinstance(data, dict) else data
+    if not isinstance(events, list):
+        rep.add("Admin events", SKIP, "unrecognised administration-events.json")
+        return
+    levels = {}
+    for e in events:
+        lvl = (e.get("level") or "UNKNOWN").replace("ADMINISTRATION_EVENT_LEVEL_", "")
+        levels[lvl] = levels.get(lvl, 0) + 1
+    errs = levels.get("ERROR", 0)
+    detail = ", ".join(f"{k}={v}" for k, v in sorted(levels.items())) or "none"
+    if errs:
+        rep.add("Admin events", WARN, f"{errs} ERROR event(s) ({detail})")
+    else:
+        rep.add("Admin events", OK, detail)
+
+
+def check_crashes(adv, bundle, rep):
+    """OOMKilled / restart churn, from the advanced describe or pod manifests."""
+    # Preferred: advanced-layer describe-pods.txt (human readable last-state).
+    describes = glob.glob(os.path.join(adv or "", "crash-upgrade-forensics", "*",
+                                       "describe-pods.txt")) if adv else []
+    oom_pods, restart_hits = set(), []
+    if describes:
+        for path in describes:
+            txt = read_text(path) or ""
+            if "OOMKilled" in txt:
+                # crude association: any pod block containing OOMKilled
+                for block in re.split(r"(?m)^Name:\s+", txt):
+                    if "OOMKilled" in block:
+                        name = block.splitlines()[0].strip() if block.strip() else "?"
+                        oom_pods.add(name)
+    # Fallback / corroboration: scan pod manifests under namespaces/.
+    prev_logs = glob.glob(os.path.join(adv or "", "crash-upgrade-forensics", "*",
+                                       "previous-logs", "*")) if adv else []
+    for yml in glob.glob(os.path.join(bundle, "namespaces", "*", "pods", "*", "*.yaml")):
+        txt = read_text(yml) or ""
+        for rc in re.findall(r"restartCount:\s*(\d+)", txt):
+            if int(rc) > 0:
+                restart_hits.append(os.path.basename(os.path.dirname(yml)))
+                break
+        if "reason: OOMKilled" in txt:
+            oom_pods.add(os.path.basename(os.path.dirname(yml)))
+
+    if not describes and not restart_hits and not oom_pods:
+        rep.add("Crashes / OOM", SKIP if not adv else OK,
+                "no restart/OOM signal found" if not adv
+                else "no OOMKilled or restarted containers")
+        return
+    if oom_pods:
+        rep.add("Crashes / OOM", FAIL,
+                f"{len(oom_pods)} pod(s) with OOMKilled", sorted(oom_pods)[:12])
+    elif restart_hits:
+        uniq = sorted(set(restart_hits))
+        rep.add("Crashes / OOM", WARN,
+                f"{len(uniq)} pod(s) with container restarts", uniq[:12])
+    else:
+        rep.add("Crashes / OOM", OK, "no OOMKilled or restarted containers")
+    if prev_logs:
+        rep.add("Previous-container logs", INFO,
+                f"{len(prev_logs)} crashed-container log(s) captured "
+                "(see crash-upgrade-forensics/*/previous-logs/)")
+
+
+# ---------------------------------------------------------------------------
+# Severity helper
+# ---------------------------------------------------------------------------
+
+def _worse(a, b):
+    return a if _RANK[a] <= _RANK[b] else b
+
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+
+def render(bundle, adv, rep):
+    print(_bold("ACS must-gather health report"))
+    print(f"  bundle : {bundle}")
+    print(f"  advanced layer: {'present' if adv else 'not present'}")
+    print()
+
+    for r in rep.results:
+        line = f"  {_tag(r.status)}  {r.name}"
+        if r.detail:
+            line += f" - {r.detail}"
+        print(line)
+        for extra in r.lines:
+            print(f"           {extra}")
+
+    counts = {}
+    for r in rep.results:
+        counts[r.status] = counts.get(r.status, 0) + 1
+    print()
+    summary = "  ".join(f"{s}={counts.get(s, 0)}" for s in (FAIL, WARN, SKIP, OK, INFO))
+    print(_bold("Summary: ") + summary)
+    if rep.has_failures():
+        print(_bold("Verdict: ") + (_CODES[FAIL] + "FAILING checks present" + _RESET
+                                     if _COLOR else "FAILING checks present"))
+    elif counts.get(WARN):
+        print(_bold("Verdict: ") + "healthy with warnings")
+    else:
+        print(_bold("Verdict: ") + "healthy")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Health report for an extracted ACS must-gather bundle.")
+    parser.add_argument("path", nargs="?", default=".",
+                        help="path to the must-gather (default: current dir)")
+    args = parser.parse_args(argv)
+
+    bundle = discover_bundle(args.path)
+    if not bundle:
+        sys.stderr.write(
+            f"error: could not find an ACS must-gather under '{args.path}'.\n"
+            "       Point me at the extracted must-gather directory.\n")
+        return 2
+
+    adv_dir = os.path.join(bundle, "advanced-acs-diagnostics")
+    adv = adv_dir if os.path.isdir(adv_dir) else None
+
+    rep = Report()
+    central_ver = check_versions(bundle, rep)
+    check_central_db(bundle, rep)
+    check_clusters(bundle, rep, central_ver)
+    check_upgrade_status(bundle, rep)
+    check_collection_errors(adv, rep)
+    check_connectivity(adv, rep)
+    check_certs(adv, rep)
+    check_heap(adv, bundle, rep)
+    check_goroutines(adv, bundle, rep)
+    check_collector(adv, rep)
+    check_admin_events(adv, rep)
+    check_crashes(adv, bundle, rep)
+
+    render(bundle, adv, rep)
+    return 1 if rep.has_failures() else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,2 +1,6 @@
 # Local must-gather captures produced by `oc adm must-gather`
 must-gather.local.*/
+
+# Python bytecode from the analyzer / tests
+__pycache__/
+*.pyc
