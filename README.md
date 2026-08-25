@@ -257,7 +257,10 @@ advanced-acs-diagnostics/
 ├── README.txt                      # what each collector is
 ├── secured-cluster-local/<ns>/     # Sensor/Collector/Admission, collected WITHOUT Central
 ├── tls-certs/                      # certificate expiry report
-└── crash-upgrade-forensics/        # crash + upgrade root-cause artifacts
+├── crash-upgrade-forensics/        # crash + upgrade root-cause artifacts
+├── scanner-v4/                     # Central-independent Scanner V4 triage
+├── vuln-report/                    # image-CVE & policy-violation snapshot
+└── platform/                       # db-init logs, PVC/registry-CA, sorted events
 ```
 
 First, sanity-check the run itself. A healthy collection has **no `.error` files**:

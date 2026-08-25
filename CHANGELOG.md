@@ -13,6 +13,110 @@ clusters. It collects three complementary layers of data: **acs-must-gather**
 `roxctl central debug download-diagnostics` bundle), and **acs-debug-dump**
 (Central's `roxctl central debug dump`, including a 30-second CPU profile).
 
+## [1.6.0] - 2026-08-21
+
+### Added Features
+
+- Known-issue diagnostics under the advanced layer
+  (`advanced-acs-diagnostics/platform/`). A new best-effort sub-collector,
+  `gather_advanced_platform`, that captures platform scoping, storage, and
+  startup forensics that map to recurring support cases but that `oc adm inspect`
+  does not surface cleanly:
+  - The `init-db` init-container log (current + previous) for **every** RHACS
+    PostgreSQL database — `central-db`, `scanner-db`, and `scanner-v4-db` — since
+    a permission error on the data volume is the classic `db-init`
+    CrashLoopBackOff and the log is lost once the pod is recreated.
+  - The Sensor `crs` init-container log (CRS-based cluster registration and cert
+    setup — a failure there stops the Secured Cluster from registering or
+    connecting).
+  - Per-database Postgres migration / lock / slow-upgrade markers.
+  - `oc describe pvc` (binding/provisioning events the PVC yaml does not spell
+    out), the OpenShift internal-registry CA configmap
+    (`image-registry-certificates`, needed to debug `x509: certificate signed by
+    unknown authority` after a CA rotation), and a single chronologically-sorted
+    events file per namespace.
+  - Toggle with `GATHER_ADV_PLATFORM`; timeout `ADV_PLATFORM_TIMEOUT`
+    (default `DIAG_TIMEOUT`, `30`).
+- Cluster-scoped collection now includes a node-to-kernel matrix (OS image +
+  kernel version per node) and ClusterVersion (OpenShift), StorageClasses, and
+  PersistentVolumes.
+- The analyzer (`analysis/acs-analyze`) gained checks for per-database `db-init`
+  permission/startup failures on any RHACS database (central-db / scanner-db /
+  scanner-v4-db), the Sensor duplicate-IP warning count, and distinct node
+  kernel versions.
+
+### Technical Changes
+
+- Scanner V4 collection additionally reports matcher/indexer memory tuning
+  (`GOMEMLIMIT`) and the component `Service` / `Endpoints`; secured-cluster
+  collection adds an x509 CA-rotation marker and a count of the
+  `belongs to 2 or more deployments` duplicate-IP warning.
+
+## [1.5.0] - 2026-08-21
+
+### Added Features
+
+- Image-CVE / vulnerability and policy-violation snapshot under the advanced
+  layer (`advanced-acs-diagnostics/vuln-report/`). A new best-effort
+  sub-collector, `gather_advanced_vuln_report`, pulled from Central's REST API
+  (admin basic-auth over `oc port-forward`, the same mechanism as the debug
+  dump). The officially-supported bundle describes Central's *health*; it does
+  not carry the per-image CVE findings or the violation list a support case
+  usually turns on. Includes:
+  - `vuln-mgmt-workloads.json` — streaming `/v1/export/vuln-mgmt/workloads`
+    (every deployment joined to its images with full CVE data, the
+    machine-readable dataset the analyzer filters).
+  - `image-cves.csv` — human-readable image CVEs (opens in any spreadsheet).
+  - `violations.json` — policy violations, paged; and
+    `alerts-summary-counts-*.json` — violation rollups by cluster / category.
+  - Violations default to `ACTIVE,ATTEMPTED` to keep the bundle bounded on
+    long-lived clusters — set `ADV_VULN_ALERT_STATES` for a fuller history.
+  - Toggle with `GATHER_ADV_VULN_REPORT`; timeout `ADV_VULN_TIMEOUT`
+    (default `300`).
+- The analyzer (`analysis/acs-analyze`) now summarizes image-scan CVEs (flagging
+  images with fixable critical / important findings) and policy violations by
+  severity when the `vuln-report/` layer is present; pass `--image <name>` to
+  drill into the per-CVE list for a specific image.
+
+## [1.4.1] - 2026-08-21
+
+### Technical Changes
+
+- Hardened the image base: pinned the base image by digest and patched OS
+  packages.
+
+## [1.4.0] - 2026-08-21
+
+### Added Features
+
+- Offline must-gather bundle health analyzer (`analysis/acs-analyze`). A
+  standalone, stdlib-only Python tool that reads an extracted must-gather and
+  prints an automated, scored health report — `OK` / `WARN` / `FAIL` / `SKIP` —
+  entirely offline, never contacting a cluster. It exits non-zero if any check
+  `FAIL`s, so it is CI / scripting friendly. New `make test` and `make analyze`
+  targets.
+- Central-independent Scanner V4 health collection under the advanced layer
+  (`advanced-acs-diagnostics/scanner-v4/`). A new best-effort sub-collector,
+  `gather_advanced_scanner_v4`, collected directly from the indexer / matcher /
+  db pods: a pod-status table (phase / ready / restarts / last-state / image),
+  each component's `/health/readiness` (HTTPS 9443) and Prometheus `/metrics`
+  (9091, best-effort), vulnerability-updater / definitions markers grep'd from
+  the component logs, and `oc describe` for the indexer / matcher / db
+  deployments. Toggle with `GATHER_ADV_SCANNER_V4`; timeout
+  `ADV_SCANNER_V4_TIMEOUT` (default `DIAG_TIMEOUT`, `30`).
+
+### Technical Changes
+
+- The shared `collect_via_pf` port-forward helper was hoisted into `common.sh`
+  so both the Scanner V4 collector and later collectors reuse it.
+
+### Note
+
+- The analyzer (`analysis/acs-analyze`) is host-side tooling and is intentionally
+  **not** copied into the image (the Dockerfile only `COPY`s
+  `collection-scripts/*`), so analyzer-only changes do not require an image
+  rebuild.
+
 ## [1.3.0] - 2026-08-19
 
 ### Added Features
