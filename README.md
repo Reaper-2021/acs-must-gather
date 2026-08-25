@@ -229,6 +229,338 @@ process exits non-zero if any check `FAIL`s, so it is CI/scripting friendly.
 Requires `python3` (stdlib only). The heap checks use `go tool pprof` when `go`
 is installed; without it they `SKIP`.
 
+## Analyzing an advanced diagnostics bundle
+
+This is a step-by-step guide to reading the `advanced-acs-diagnostics/` folder and
+deciding whether a Secured Cluster is healthy. It assumes you have already
+extracted a must-gather and are sitting in the image sub-directory (the one named
+`quay-io-...-acs-must-gather-sha256-...`).
+
+### Prerequisites (all free, no cluster access needed)
+
+- **`go`** — provides `go tool pprof`, used to read the `*.pb.gz` profiles. (Or
+  install the standalone `pprof`: `go install github.com/google/pprof@latest`.)
+- **`graphviz`** — only needed for the graphical/flame-graph views of pprof
+  (`brew install graphviz` / `dnf install graphviz`). Text views work without it.
+- **`jq`** — for the `*.json` files.
+
+Set a shell variable to the folder so the examples below copy-paste cleanly:
+
+```sh
+ADV="advanced-acs-diagnostics"
+```
+
+### Step 0 — Orient yourself
+
+```
+advanced-acs-diagnostics/
+├── README.txt                      # what each collector is
+├── secured-cluster-local/<ns>/     # Sensor/Collector/Admission, collected WITHOUT Central
+├── tls-certs/                      # certificate expiry report
+└── crash-upgrade-forensics/        # crash + upgrade root-cause artifacts
+```
+
+First, sanity-check the run itself. A healthy collection has **no `.error` files**:
+
+```sh
+find "$ADV" -name '*.error'          # expect: no output
+```
+
+A `.error` file is not fatal — each collector is best-effort — but it tells you
+what was unreachable (often itself a finding). Note the two shapes: a single
+`sensor.error` means no running Sensor pod was found at all, whereas per-endpoint
+files like `sensor-heap.pb.gz.error` mean the pod is up but that debug/metrics
+server did not answer.
+
+A `sensor-clusterentities-state.json.skipped` file is **normal** — that store is
+only served when Sensor runs with `ROX_DEBUG_CLUSTER_ENTITIES_STORE=true`.
+
+---
+
+### Step 1 — Sensor memory: `secured-cluster-local/<ns>/sensor-heap.pb.gz`
+
+**What it stores:** a sampled Go heap profile (a gzip-compressed protobuf) — a
+snapshot of Sensor's live memory at collection time, broken down by the call
+stack that allocated it. It holds four measurements per allocation site:
+`inuse_space`/`inuse_objects` (memory **live right now**) and
+`alloc_space`/`alloc_objects` (memory **ever allocated**, i.e. GC churn). It does
+**not** contain object contents — no secrets or payloads.
+
+**Simplest examples (start here).** The `.pb.gz` is just a gzipped protobuf — you
+never unzip it yourself; `go tool pprof` reads it directly, fully offline (nothing
+here touches the cluster). If you only remember three commands:
+
+```sh
+HEAP="$ADV/secured-cluster-local/stackrox/sensor-heap.pb.gz"
+
+# 1. How much memory is live in total, and what is using the most? (top 10)
+go tool pprof -inuse_space -top -nodecount=10 "$HEAP"
+
+# 2. Show the same thing as a picture (needs graphviz)
+go tool pprof -inuse_space -web "$HEAP"
+
+# 3. Zoom in on one function by name (e.g. anything matching "Unmarshal")
+go tool pprof -inuse_space -peek Unmarshal "$HEAP"
+```
+
+(Command 3 uses `-peek`, not `-list`: `-peek` needs only the profile, while the
+source-line `-list` view also needs the matching Sensor binary — see the note at
+the end of this step.)
+
+Reading command 1: the header line (`... of 189.15MB total`) is the live heap; the
+first column (`flat`) is memory held by that function itself, `cum` is it plus
+everything it calls. Biggest `flat` at the top = your top memory consumer. The
+detailed steps below build on exactly these commands.
+
+**Step 1a — who is using memory right now:**
+
+```sh
+go tool pprof -inuse_space -top -nodecount=15 "$ADV/secured-cluster-local/stackrox/sensor-heap.pb.gz"
+```
+
+Example output from a healthy Sensor:
+
+```
+Type: inuse_space
+Showing nodes accounting for 137.81MB, 72.86% of 189.15MB total
+      flat  flat%   sum%        cum   cum%
+   59.27MB 31.34% 31.34%    59.27MB 31.34%  go.uber.org/zap/zapcore.newCounters
+   15.50MB  8.20% 39.53%    23.51MB 12.43%  ...json.(*decodeState).objectInterface
+    9.50MB  5.02% 44.56%       25MB 13.22%  storage.(*ImageScan).UnmarshalVT
+    9.50MB  5.02% 49.58%       15MB  7.93%  storage.(*NetworkEntityInfo).UnmarshalVT
+    7.75MB  4.10% 53.68%     7.75MB  4.10%  sensor/common/externalsrcs.(*handlerImpl).saveEntitiesNoLock
+```
+
+**How to read it:**
+- `189 MB total` live is normal for a Sensor. Compare against the pod's memory
+  limit (see `crash-upgrade-forensics/<ns>/describe-pods.txt`): if live heap is
+  near the limit, OOMKills are imminent.
+- The top consumers here are logging counters and protobuf/JSON unmarshaling of
+  `ImageScan` / `NetworkEntityInfo` — expected for a Sensor processing image
+  scans and network flows. A single unexpected function holding a large,
+  ever-growing share is the red flag.
+
+**Step 1b — interactive exploration** (drill into a suspect function):
+
+```sh
+go tool pprof "$ADV/secured-cluster-local/stackrox/sensor-heap.pb.gz"
+(pprof) top20              # biggest consumers
+(pprof) tree saveEntities  # callers/callees of a function
+(pprof) peek Unmarshal     # who calls anything matching "Unmarshal"
+(pprof) web                # opens a graph in the browser (needs graphviz)
+```
+
+**Step 1c — leak detection (the most valuable use).** A single snapshot cannot
+prove a leak; a *trend* can. Collect two must-gathers a few minutes apart and
+diff them:
+
+```sh
+go tool pprof -inuse_space -diff_base OLD/sensor-heap.pb.gz NEW/sensor-heap.pb.gz
+```
+
+Any node whose memory keeps **growing** across snapshots (especially in
+StackRox code) is a leak candidate. Flat or fluctuating = healthy churn.
+
+> Function names are embedded, so `top`/`tree` work out of the box. Source-line
+> view (`list <fn>`) needs the matching Sensor binary — identify it by the
+> **Build ID** printed at the top of the profile.
+
+---
+
+### Step 2 — Sensor concurrency: `sensor-goroutine.txt`
+
+**What it stores:** a full text dump of every goroutine (Go's lightweight
+threads) and its current stack, from `/debug/goroutine?debug=2`.
+
+**Step 2a — count goroutines** (the single best liveness number):
+
+```sh
+grep -c '^goroutine ' "$ADV/secured-cluster-local/stackrox/sensor-goroutine.txt"
+```
+
+A healthy Sensor is typically a few hundred to low thousands. **Tens of
+thousands, or a number that keeps climbing across snapshots, means a goroutine
+leak** — usually a blocked channel send/receive or an un-cancelled context.
+
+**Step 2b — find what they are stuck on** (group by top-of-stack function):
+
+```sh
+grep -A1 '^goroutine ' "$ADV/secured-cluster-local/stackrox/sensor-goroutine.txt" \
+  | grep -v '^goroutine' | grep -v '^--' | sort | uniq -c | sort -rn | head
+```
+
+**Step 2c — look for long-blocked goroutines.** The dump annotates how long a
+goroutine has been blocked; anything stuck for many minutes is suspicious:
+
+```sh
+grep -oE '[0-9]+ minutes' "$ADV/secured-cluster-local/stackrox/sensor-goroutine.txt" | sort -rn | head
+```
+
+---
+
+### Step 3 — Metrics: `sensor-metrics.txt`, `admission-control-metrics.txt`, `collector-metrics.txt`
+
+**What they store:** a one-shot scrape of each component's Prometheus `/metrics`
+endpoint (plain text, `# HELP` / `# TYPE` / `metric{labels} value`).
+
+**Step 3a — is Sensor actually talking to Central?** Look at Sensor's own
+counters and its gRPC client totals; these should be non-zero and, across two
+snapshots, **increasing**. Exact metric names vary by version, so grep broadly
+rather than for a fixed name:
+
+```sh
+grep -iE '^rox_sensor_|grpc' "$ADV/secured-cluster-local/stackrox/sensor-metrics.txt" | head -30
+```
+
+**Step 3b — Go runtime health (leak corroboration):**
+
+```sh
+grep -E '^go_goroutines|^go_memstats_heap_inuse_bytes|^process_resident_memory_bytes' \
+  "$ADV/secured-cluster-local/stackrox/sensor-metrics.txt"
+```
+
+`go_goroutines` should match Step 2a; `process_resident_memory_bytes` is the RSS
+you compare against the pod limit.
+
+**Step 3c — error/drop counters** (should be low and stable):
+
+```sh
+grep -iE 'error|dropped|failed|reject' "$ADV/secured-cluster-local/stackrox/sensor-metrics.txt" | grep -vE ' 0$'
+```
+
+Anything here with a large or growing value is a live problem.
+
+---
+
+### Step 4 — Collector: `collector-status.txt` and `collector-pods.txt`
+
+**What they store:** the collection driver each Collector pod is using and its
+restart state (`collector-status.txt`), plus `oc get pods -o wide` for the
+DaemonSet (`collector-pods.txt`).
+
+```sh
+cat "$ADV/secured-cluster-local/stackrox/collector-status.txt"
+```
+
+Example (healthy):
+
+```
+=== collector-bpdfv ===
+  collectionMethod: CORE_BPF
+  restartCount: 0
+  lastState:
+```
+
+**How to read it:**
+- `collectionMethod: CORE_BPF` (or `EBPF`) on **every** node is what you want.
+- `restartCount` climbing, or a `lastState` of `Terminated`/`OOMKilled`, points to
+  kernel-compatibility or memory problems on that specific node.
+- Confirm there is one Collector pod per node in `collector-pods.txt`; a missing
+  node means that node's runtime activity is not being observed.
+
+---
+
+### Step 5 — Connectivity summary: `sensor-connectivity-summary.txt`
+
+**What it stores:** the connection/certificate-relevant lines grep'd out of the
+Sensor log, so you can judge the Sensor↔Central link without reading full logs.
+
+**Healthy** looks like a clean connect sequence:
+
+```
+Info: Connecting to Central server central.stackrox.svc:443
+Info: Established connection to Central.
+Info: Communication with central started.
+```
+
+**Unhealthy** — watch for these and act accordingly:
+
+| Line contains | Likely cause |
+|---|---|
+| `not trusted` / `invalid trust info signature` | cert/CA mismatch → check Step 6 |
+| `different Central installation` | Sensor pointed at a re-installed Central → re-issue init bundle |
+| `checking central status ... failed` / repeated `Connecting to Central` | network/DNS/Central-down |
+| `offline mode` | Sensor lost Central and is buffering |
+
+---
+
+### Step 6 — Certificates: `tls-certs/cert-expiry-summary.txt`
+
+**What it stores:** subject/issuer/validity for every RHACS service certificate,
+decoded from the TLS secrets (public cert material only — **private keys are
+never read**). This is otherwise invisible because `oc adm inspect` redacts
+secrets.
+
+**Find anything not healthy in one command:**
+
+```sh
+grep -vE 'OK \(>30d' "$ADV/tls-certs/cert-expiry-summary.txt" | grep -E 'status:|==='
+```
+
+- `status: OK (>30d remaining)` on all entries → certs are fine.
+- `status: WARNING - expires within 30 days` → plan a rotation now.
+- `status: EXPIRED` → this is very likely your root cause; expired mTLS certs are
+  the classic reason Sensor/Scanner "suddenly can't connect". Cross-reference
+  with the `not trusted` line in Step 5.
+
+---
+
+### Step 7 — Crashes & upgrades: `crash-upgrade-forensics/`
+
+**Step 7a — why did a container die?** `previous-logs/` holds the log of the
+*previous* (crashed) instance of every container that has restarted — the single
+most useful crash artifact, and one a normal must-gather does not isolate:
+
+```sh
+ls "$ADV/crash-upgrade-forensics/stackrox/previous-logs/"
+tail -50 "$ADV/crash-upgrade-forensics/stackrox/previous-logs/<pod>-<container>.log"
+```
+
+**Step 7b — OOMKilled / scheduling failures:** `describe-pods.txt` carries the
+container `Last State`, exit codes, and events:
+
+```sh
+grep -E 'OOMKilled|Reason|Exit Code|FailedScheduling|Back-off' \
+  "$ADV/crash-upgrade-forensics/stackrox/describe-pods.txt"
+```
+
+`OOMKilled` here + a high `inuse_space` in Step 1 = raise the memory limit or
+find the leak.
+
+**Step 7c — RHACS's own view of problems:** `administration-events.json` is what
+Central surfaces to admins (scan failures, integration errors, expiring tokens):
+
+```sh
+jq -r '.events[] | "\(.level)  \(.type)  \(.hint // .message)"' \
+  "$ADV/crash-upgrade-forensics/administration-events.json"
+```
+
+**Step 7d — upgrade problems:** if a Sensor upgrade is stuck, look at the
+per-namespace `sensor-upgrader.log` / `sensor-upgrader-deployment.txt` /
+`sensor-upgrader-sa.yaml` under `crash-upgrade-forensics/<ns>/`, plus the
+cluster-scoped `crash-upgrade-forensics/upgrade-sensors-rbac.yaml`; their absence
+simply means no upgrade was in progress.
+
+---
+
+### Quick "is this cluster healthy?" checklist
+
+| Check | Healthy | Where |
+|---|---|---|
+| No collection errors | no `.error` files | `find "$ADV" -name '*.error'` |
+| Sensor↔Central connected | `Established connection to Central` | Step 5 |
+| Certs valid | all `OK (>30d)` | Step 6 |
+| Sensor memory sane | live heap well under pod limit | Steps 1 + 7b |
+| No goroutine leak | count stable, low thousands | Step 2 |
+| No crash loops | `restartCount` low, no `OOMKilled` | Steps 4 + 7b |
+| Collector on every node | one `CORE_BPF`/`EBPF` pod per node | Step 4 |
+| No admin-visible errors | few/no `ERROR` events | Step 7c |
+
+If every row is green, the Secured Cluster is functioning well. The most common
+real failures this bundle exposes are, in order: **expired certificates**
+(Step 6), **OOMKilled components** (Steps 1 + 7b), and **Sensor↔Central
+connectivity breaks** (Step 5).
+
 ## Building
 
 ```sh
