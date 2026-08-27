@@ -1,0 +1,42 @@
+name: CI
+
+# Delegates to the Makefile targets (`make lint`, `make test`) so the checks
+# run identically here and on a contributor's machine -- the Makefile stays the
+# single source of truth for what "green" means.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint (shellcheck + analyzer compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # shellcheck ships preinstalled on ubuntu-latest and reads .shellcheckrc
+      # from the repo root (source-path + disabled rules).
+      - name: shellcheck version
+        run: shellcheck --version
+      - name: make lint
+        run: make lint
+
+  test:
+    name: analyzer unit tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The analyzer is stdlib-only; test across the supported range.
+        python-version: ["3.9", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: make test
+        run: make test
