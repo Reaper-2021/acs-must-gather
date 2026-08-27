@@ -93,8 +93,10 @@ done <<< "${ACS_NAMESPACES}"
 if [[ -n "${CENTRAL_POD}" ]]; then
     ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" central-htpasswd \
         -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
-    [[ -z "${ADMIN_PASSWORD}" ]] && ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" stackrox-admin-password \
-        -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    if [[ -z "${ADMIN_PASSWORD}" ]]; then
+        ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" stackrox-admin-password \
+            -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    fi
 
     if [[ -n "${ADMIN_PASSWORD}" ]]; then
         pf_log="$(mktemp)"; curl_cfg="$(mktemp)"; chmod 600 "${curl_cfg}"
