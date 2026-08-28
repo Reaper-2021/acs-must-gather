@@ -92,6 +92,12 @@ Add a `CHANGELOG.md` entry when your change is user-visible and *particularly
 noteworthy* — especially deprecations or non-obvious side effects. Purely
 internal refactors, test-only, and CI/tooling changes usually don't need one.
 
+## License
+
+ACS Must-Gather is licensed under the [Apache License 2.0](LICENSE). By
+opening a pull request you agree that your contribution is submitted under
+that license, unless you state otherwise.
+
 ## Commit messages & PRs
 
 - Keep the subject short and imperative; a type prefix (`ci:`, `docs:`, `fix:`,
