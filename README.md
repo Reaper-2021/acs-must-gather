@@ -587,3 +587,7 @@ make test
 ```
 
 Runs the analyzer test suite (`tests/test_analyze.py`, stdlib `unittest`).
+
+## License
+
+This project is licensed under the [Apache License 2.0](LICENSE).
