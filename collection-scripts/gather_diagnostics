@@ -16,93 +16,32 @@ log_msg "--- gather_diagnostics: starting ---"
 DIAG_DIR="${MUST_GATHER_DIR}/acs-diagnostics"
 mkdir -p "${DIAG_DIR}"
 
-# ---------- Find running Central pod ----------
-CENTRAL_POD=""
-CENTRAL_NS=""
-
-while IFS= read -r ns; do
-    [[ -z "${ns}" ]] && continue
-    pod=$(oc get pods -n "${ns}" -l app=central \
-        --field-selector=status.phase=Running \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
-    if [[ -n "${pod}" ]]; then
-        CENTRAL_POD="${pod}"
-        CENTRAL_NS="${ns}"
-        break
-    fi
-done <<< "${ACS_NAMESPACES}"
-
-if [[ -z "${CENTRAL_POD}" ]]; then
-    log_msg "WARNING: No running Central pod found. Skipping diagnostic collection."
-    echo "No running Central pod found." > "${DIAG_DIR}/collection-error.txt"
+# /v1/metadata works without auth; everything else needs the admin password.
+# optional mode still opens the port-forward so the unauthenticated endpoint
+# can be collected when the secret is missing.
+if ! open_central_session optional "${DIAG_DIR}/collection-error.txt" "diagnostic collection"; then
     exit 0
 fi
+trap cleanup_central_session EXIT
 
-log_msg "Found Central pod: ${CENTRAL_POD} in namespace ${CENTRAL_NS}"
-
-# ---------- Retrieve admin credentials ----------
-# Central's API endpoints (except /v1/metadata) require authentication. Try the
-# current central-htpasswd secret first, then the legacy secret name.
-ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" central-htpasswd \
-    -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
-if [[ -z "${ADMIN_PASSWORD}" ]]; then
-    ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" stackrox-admin-password \
-        -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
-fi
-if [[ -z "${ADMIN_PASSWORD}" ]]; then
-    log_msg "WARNING: Could not retrieve Central admin password; auth-required endpoints will fail."
-fi
-
-# ---------- Set up port-forward to Central ----------
-LOCAL_PORT=8443
-while lsof -Pi ":${LOCAL_PORT}" -sTCP:LISTEN -t >/dev/null 2>&1; do
-    LOCAL_PORT=$((LOCAL_PORT + 1))
-    if [[ ${LOCAL_PORT} -gt 9000 ]]; then
-        log_msg "ERROR: Could not find an available local port for port-forward"
-        echo "Could not find available local port for port-forward" > "${DIAG_DIR}/collection-error.txt"
-        exit 0
-    fi
-done
-
-oc port-forward -n "${CENTRAL_NS}" "${CENTRAL_POD}" "${LOCAL_PORT}:8443" >/dev/null 2>&1 &
-PF_PID=$!
-sleep 3
-if ! kill -0 "${PF_PID}" 2>/dev/null; then
-    log_msg "ERROR: Port-forward to Central failed to establish"
-    echo "Port-forward to Central failed to establish" > "${DIAG_DIR}/collection-error.txt"
-    exit 0
-fi
-log_msg "Port-forward established on local port ${LOCAL_PORT} (PID: ${PF_PID})"
-
-# Keep the admin password off the curl command line (visible via ps / /proc):
-# write it to a temporary curl config (mode 600) and pass it via --config.
-CURL_CONFIG=""
 CURL_AUTH=()
-if [[ -n "${ADMIN_PASSWORD}" ]]; then
-    CURL_CONFIG="$(mktemp)"
-    chmod 600 "${CURL_CONFIG}"
-    printf 'user = "admin:%s"\n' "${ADMIN_PASSWORD}" > "${CURL_CONFIG}"
-    CURL_AUTH=(--config "${CURL_CONFIG}")
-fi
-
-cleanup() {
-    kill "${PF_PID}" 2>/dev/null || true
-    wait "${PF_PID}" 2>/dev/null || true
-    [[ -n "${CURL_CONFIG}" ]] && rm -f "${CURL_CONFIG}"
-}
-trap cleanup EXIT
+[[ -n "${CURL_CONFIG}" ]] && CURL_AUTH=(--config "${CURL_CONFIG}")
 
 collect_endpoint() {
     local name="$1"
     local path="$2"
     local output_file="$3"
 
+    # Background invocations inherit the parent's EXIT trap; do not let a
+    # finished endpoint collector tear down the shared Central session.
+    trap - EXIT
+
     log_msg "  Collecting ${name}: ${path}"
     # -k is intentional: Central serves a self-signed cert on the localhost
     # port-forward, so CA/hostname verification does not apply.
     timeout "${DIAG_TIMEOUT}" \
         curl -sSk "${CURL_AUTH[@]}" \
-        "https://localhost:${LOCAL_PORT}${path}" \
+        "https://127.0.0.1:${LOCAL_PORT}${path}" \
         > "${DIAG_DIR}/${output_file}" 2>/dev/null || {
             log_msg "WARNING: Failed to collect ${name}"
             echo "Failed to collect ${name} from ${path}" > "${DIAG_DIR}/${output_file}.error"
