@@ -13,6 +13,16 @@ clusters. It collects three complementary layers of data: **acs-must-gather**
 `roxctl central debug download-diagnostics` bundle), and **acs-debug-dump**
 (Central's `roxctl central debug dump`, including a 30-second CPU profile).
 
+## [Unreleased]
+
+### Bug Fixes
+
+- Cluster-scoped collection now inspects ACS custom resource instances
+  (`Central`, `SecuredCluster`, `SecurityPolicy`) across all namespaces.
+  `inspect_resource` previously dropped `--all-namespaces`, so `oc adm inspect`
+  searched only the must-gather pod's namespace and the CR YAML never appeared
+  in the bundle.
+
 ## [1.6.0] - 2026-08-21
 
 ### Added Features
