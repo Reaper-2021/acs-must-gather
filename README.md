@@ -30,6 +30,21 @@ oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest -
 oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest --since-time=2024-01-15T10:00:00Z
 ```
 
+### Permissions
+
+`oc adm must-gather` creates a short-lived pod in a temporary namespace and
+binds the namespace `default` ServiceAccount to **cluster-admin** so the
+collectors can read cluster-scoped resources, secrets, and logs. You must be
+able to run `oc adm must-gather` yourself (typically cluster-admin or
+equivalent).
+
+This image additionally:
+
+- Reads the Central admin password from `central-htpasswd` / `stackrox-admin-password` to download the diagnostic bundle, debug dump, and advanced API snapshots over `oc port-forward`.
+- Lists and inspects RHACS CRDs, webhooks, ClusterRoles, SCCs, and workloads across namespaces.
+
+Treat every must-gather bundle as confidential. See [SECURITY.md](SECURITY.md) for data-handling guidance.
+
 ## What is collected
 
 ### Operator
@@ -175,6 +190,7 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
 | `MUST_GATHER_SINCE` | Duration filter for logs (e.g., `8h`, `30m`). Set by `oc adm must-gather --since=…` (OpenShift 4.16+). | (all logs) |
 | `MUST_GATHER_SINCE_TIME` | ISO 8601 timestamp for log start. Set by `oc adm must-gather --since-time=…`. | (all logs) |
 | `MUST_GATHER_DIR` | Output base directory | `/must-gather` |
+| `REDUCE_LOGS` | Comma-separated bundle-size options: `skip_rotated_logs` (omit `--rotated-pod-logs` from `oc adm inspect`), `compress_logs` (gzip `.log` files ≥10MB after collection) | (unset) |
 | `GATHER_DIAGNOSTICS` | Enable Central diagnostic endpoint collection | `true` |
 | `GATHER_DIAGNOSTIC_BUNDLE` | Enable RHACS diagnostic bundle collection | `true` |
 | `INSPECT_TIMEOUT` | Timeout per `oc adm inspect` call (seconds) | `120` |
@@ -587,10 +603,12 @@ analyzer syntax check).
 ## Testing
 
 ```sh
-make test
+make test        # analyzer unit tests (stdlib unittest)
+make test-shell  # BATS tests for collection-scripts/common.sh
 ```
 
-Runs the analyzer test suite (`tests/test_analyze.py`, stdlib `unittest`).
+Requires [bats](https://github.com/bats-core/bats-core) for `make test-shell`
+(`brew install bats-core` on macOS, `apt install bats` on Ubuntu).
 
 ## License
 

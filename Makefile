@@ -3,7 +3,7 @@ IMAGE_NAME ?= acs-must-gather
 IMAGE_TAG  ?= latest
 IMAGE      := $(IMAGE_REPO)/$(IMAGE_NAME):$(IMAGE_TAG)
 
-.PHONY: build push lint test analyze clean
+.PHONY: build push lint test test-shell analyze clean
 
 build:
 	podman build --platform linux/amd64 -t $(IMAGE) .
@@ -17,6 +17,9 @@ lint:
 
 test:
 	python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+test-shell:
+	bats tests/common.bats
 
 # Analyze an extracted must-gather: make analyze BUNDLE=path/to/must-gather
 analyze:

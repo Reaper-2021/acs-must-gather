@@ -13,6 +13,26 @@ clusters. It collects three complementary layers of data: **acs-must-gather**
 `roxctl central debug download-diagnostics` bundle), and **acs-debug-dump**
 (Central's `roxctl central debug dump`, including a 30-second CPU profile).
 
+## [1.7.0] - 2026-09-16
+
+### Added Features
+
+- `REDUCE_LOGS` support aligned with OpenShift must-gather:
+  `skip_rotated_logs` omits `--rotated-pod-logs` from `oc adm inspect`;
+  `compress_logs` gzips collected `.log` files ≥10MB after all sub-collectors
+  finish.
+- BATS unit tests for `collection-scripts/common.sh` (`make test-shell`).
+- [SECURITY.md](SECURITY.md) with vulnerability reporting and data-handling
+  guidance.
+- README *Permissions* section documenting cluster-admin requirements.
+- `.github/CODEOWNERS` and pull request template.
+- CI image build + Trivy scan job on every pull request.
+
+### Technical Changes
+
+- `init_log_collection` centralizes `MUST_GATHER_SINCE*` and `REDUCE_LOGS`
+  parsing; exported globals are inherited by parallel sub-gatherers.
+
 ## [1.6.1] - 2026-09-16
 
 ### Bug Fixes
