@@ -22,25 +22,35 @@ get_log_collection_args() {
     fi
 }
 
-# inspect_resource <resource> [namespace]
+# inspect_resource <resource> [namespace] [extra oc adm inspect flags...]
 # Wrapper around oc adm inspect with timeout, dest-dir, and log-collection args.
+# Extra flags after namespace are forwarded (e.g. --all-namespaces). Namespace
+# may be empty when the extra flags are the only optional arguments.
 inspect_resource() {
     local resource="$1"
     local namespace="${2:-}"
+    shift
+    if (($# > 0)); then
+        shift
+    fi
 
-    local ns_arg=""
+    local ns_flags=()
     if [[ -n "${namespace}" ]]; then
-        ns_arg="-n ${namespace}"
+        ns_flags=(-n "${namespace}")
     fi
 
     local log_args
     log_args="$(get_log_collection_args)"
 
-    log_msg "  Inspecting ${resource}${namespace:+ in ${namespace}}"
+    local extra_note=""
+    if [[ " $* " == *" --all-namespaces "* ]]; then
+        extra_note=" (all namespaces)"
+    fi
+    log_msg "  Inspecting ${resource}${namespace:+ in ${namespace}}${extra_note}"
     # shellcheck disable=SC2086
     timeout "${INSPECT_TIMEOUT}" \
-        oc adm inspect ${ns_arg} --dest-dir="${MUST_GATHER_DIR}" \
-        ${log_args} "${resource}" 2>&1 || true
+        oc adm inspect "${ns_flags[@]}" --dest-dir="${MUST_GATHER_DIR}" \
+        ${log_args} "$@" "${resource}" 2>&1 || true
 }
 
 inspect_namespace() {

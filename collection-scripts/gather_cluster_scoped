@@ -26,8 +26,11 @@ else
 fi
 
 # ---------- CR instances (cluster-wide) ----------
+# These kinds are namespaced. Without --all-namespaces, oc adm inspect looks
+# only in the must-gather pod's namespace and the CR YAML never lands in the
+# bundle. Namespace inspect does not include arbitrary CRs.
 log_msg "Collecting ACS CR instances..."
-for cr_kind in Central SecuredCluster; do
+for cr_kind in Central SecuredCluster SecurityPolicy; do
     if oc get "${cr_kind}" -A &>/dev/null 2>&1; then
         inspect_resource "${cr_kind}" "" "--all-namespaces"
     fi
