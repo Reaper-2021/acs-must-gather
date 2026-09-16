@@ -3,7 +3,7 @@ IMAGE_NAME ?= acs-must-gather
 IMAGE_TAG  ?= latest
 IMAGE      := $(IMAGE_REPO)/$(IMAGE_NAME):$(IMAGE_TAG)
 
-.PHONY: build push lint test test-shell test-integration check-bundles analyze clean
+.PHONY: build push lint test test-shell test-integration check-bundles validate analyze clean
 
 build:
 	podman build --platform linux/amd64 -t $(IMAGE) .
@@ -26,6 +26,9 @@ test-integration:
 
 check-bundles:
 	bash scripts/check-no-bundles.sh
+
+# Run every offline check (no cluster needed): lint, all tests, bundle guard.
+validate: lint test test-shell test-integration check-bundles
 
 # Analyze an extracted must-gather: make analyze BUNDLE=path/to/must-gather
 analyze:
