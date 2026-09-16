@@ -47,8 +47,11 @@ follow a few hard conventions:
   best-effort (`... || true`) and log what happened.
 - **Reuse `common.sh` helpers** rather than re-implementing them: `log_msg`,
   `inspect_resource` / `inspect_namespace`, `resource_exists`, the namespace
-  discovery helpers, and `collect_via_pf` for endpoints reached via
-  `oc port-forward`.
+  discovery helpers, `collect_via_pf` for endpoints reached via
+  `oc port-forward`, and the Central API helpers (`discover_central_pod`,
+  `fetch_central_admin_password`, `start_central_port_forward`,
+  `write_central_curl_config`, `cleanup_central_api_session`) for anything that
+  talks to Central over HTTPS.
 - **On failure, leave a breadcrumb.** Best-effort collectors write a
   `<file>.error` next to the missing output (the analyzer's "Collection errors"
   check surfaces these) and still exit `0`.
