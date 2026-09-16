@@ -1,8 +1,9 @@
 name: CI
 
-# Delegates to the Makefile targets (`make lint`, `make test`, `make test-shell`)
-# so the checks run identically here and on a contributor's machine -- the
-# Makefile stays the single source of truth for what "green" means.
+# Delegates to the Makefile targets (`make lint`, `make test`, `make test-shell`,
+# `make test-integration`, `make check-bundles`) so the checks run identically
+# here and on a contributor's machine -- the Makefile stays the single source of
+# truth for what "green" means.
 on:
   push:
     branches: [main]
@@ -50,6 +51,37 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bats
       - name: make test-shell
         run: make test-shell
+
+  integration-test:
+    name: integration tests (recorded fixtures)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+      - name: make test-integration
+        run: make test-integration
+
+  check-bundles:
+    name: no committed must-gather bundles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make check-bundles
+        run: make check-bundles
+
+  gitleaks:
+    name: secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks-action diffs the PR commit range; shallow clones lack parent refs.
+          fetch-depth: 0
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   image:
     name: image build and scan

@@ -13,6 +13,29 @@ clusters. It collects three complementary layers of data: **acs-must-gather**
 `roxctl central debug download-diagnostics` bundle), and **acs-debug-dump**
 (Central's `roxctl central debug dump`, including a 30-second CPU profile).
 
+## [1.8.0] - 2026-09-16
+
+### Added Features
+
+- `ROX_API_TOKEN` bearer-token authentication for Central API collectors
+  (preferred over reading the admin password secret).
+- Integration tests with recorded Central API fixtures (`make test-integration`).
+- `scripts/check-no-bundles.sh` and CI job to block committed must-gather
+  output paths.
+- gitleaks secret scanning in CI.
+- [VERSIONING.md](VERSIONING.md) documenting RHACS minor-version tags and
+  distribution status (community tooling, not `registry.redhat.io`).
+
+### Changed Defaults
+
+- `GATHER_ADV_VULN_REPORT` now defaults to **`false`** (opt-in for the
+  high-sensitivity CVE/violation export layer).
+
+### Technical Changes
+
+- `resolve_central_api_auth()` centralizes token vs admin-password selection;
+  `write_central_curl_config()` supports Bearer or basic-auth curl configs.
+
 ## [1.7.0] - 2026-09-16
 
 ### Added Features

@@ -28,20 +28,29 @@ must-gather bundle as **confidential**:
 | `acs-diagnostic-bundle/` | Medium–High | Official RHACS bundle; scrubbed auth providers, but includes cluster topology and logs. |
 | `acs-debug-dump/` | High | Central profiling data and database diagnostics. |
 | `advanced-acs-diagnostics/tls-certs/` | Medium | **Public certificate material only** — private keys are never decoded. |
-| `advanced-acs-diagnostics/vuln-report/` | High | Per-image CVE findings and policy violations across the fleet. |
+| `advanced-acs-diagnostics/vuln-report/` | **High** | Per-image CVE findings and policy violations across the fleet. **Disabled by default** (`GATHER_ADV_VULN_REPORT=false`). Enable only when a support case requires fleet-wide CVE/violation data. |
 | `gather.log` | Medium | May reference namespaces, pod names, and endpoint paths. |
 
 **Operational guidance:**
 
 - Transfer bundles only over encrypted channels (SFTP, support-case upload, etc.).
 - Do not commit extracted must-gather directories to git or share them in public tickets.
-- Disable layers you do not need (`GATHER_ADV_VULN_REPORT=false`, `GATHER_DEBUG_DUMP=false`, etc.) when a smaller bundle is sufficient.
+- Keep `GATHER_ADV_VULN_REPORT=false` unless you explicitly need fleet-wide CVE
+  and violation exports.
+- Disable other layers you do not need (`GATHER_DEBUG_DUMP=false`, etc.) when a
+  smaller bundle is sufficient.
 
 ## Credentials Used During Collection
 
-The image reads the Central **admin password** from the `central-htpasswd` or
-`stackrox-admin-password` secret to call Central's authenticated API over a
-short-lived `oc port-forward`. The password is:
+Central API collectors authenticate over a short-lived `oc port-forward` using
+either:
+
+1. **`ROX_API_TOKEN`** (preferred) — a bearer token with sufficient Central API
+   read access (the same token `roxctl` uses), or
+2. The Central **admin password** from `central-htpasswd` or
+   `stackrox-admin-password` when no token is supplied.
+
+Credentials are:
 
 - Never passed on the `curl` command line (mode-600 curl config file instead).
 - Not written into the must-gather output.
@@ -54,6 +63,8 @@ See the README *Permissions* section for details.
 ## Dependency and Image Scanning
 
 CI builds the container image and runs a [Trivy](https://github.com/aquasecurity/trivy)
-scan on every pull request. The base image (`origin-must-gather`) may report
-HIGH findings in the bundled `oc` binary; those come from the upstream OpenShift
-payload, not from packages installed in this Dockerfile.
+scan on every pull request. [gitleaks](https://github.com/gitleaks/gitleaks) scans
+the repository for accidentally committed secrets. The base image
+(`origin-must-gather`) may report HIGH findings in the bundled `oc` binary; those
+come from the upstream OpenShift payload, not from packages installed in this
+Dockerfile.

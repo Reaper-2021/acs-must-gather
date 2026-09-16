@@ -1,5 +1,9 @@
 # Local must-gather captures produced by `oc adm must-gather`
 must-gather.local.*/
+must-gather/
+quay-io-*/
+*.must-gather.tar
+*.must-gather.tgz
 
 # Python bytecode from the analyzer / tests
 __pycache__/

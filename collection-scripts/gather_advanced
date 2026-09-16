@@ -87,7 +87,7 @@ if [[ "${GATHER_ADV_SCANNER_V4:-true}" == "true" ]]; then
     log_msg "Launched gather_advanced_scanner_v4 (PID: ${PIDS[-1]})"
 fi
 
-if [[ "${GATHER_ADV_VULN_REPORT:-true}" == "true" ]]; then
+if [[ "${GATHER_ADV_VULN_REPORT:-false}" == "true" ]]; then
     /usr/bin/gather_advanced_vuln_report &
     PIDS+=($!)
     log_msg "Launched gather_advanced_vuln_report (PID: ${PIDS[-1]})"

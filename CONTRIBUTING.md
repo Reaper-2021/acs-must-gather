@@ -22,9 +22,11 @@ request.
 2. Make your change.
 3. Run the checks locally — they must pass before you open a PR:
    ```sh
-   make lint        # shellcheck + analyzer py_compile
-   make test        # analyzer unit tests
-   make test-shell  # BATS tests for common.sh (when collection scripts change)
+   make lint             # shellcheck + analyzer py_compile
+   make test             # analyzer unit tests
+   make test-shell       # BATS tests for common.sh (when collection scripts change)
+   make test-integration # collector integration tests (when collectors or fixtures change)
+   make check-bundles    # ensure no must-gather output is tracked in git
    ```
    No output from `make lint` means it passed (both tools are silent on
    success). `$?` is `0` on success.
@@ -50,7 +52,7 @@ follow a few hard conventions:
   `inspect_resource` / `inspect_namespace`, `resource_exists`, the namespace
   discovery helpers, `collect_via_pf` for endpoints reached via
   `oc port-forward`, and the Central API helpers (`discover_central_pod`,
-  `fetch_central_admin_password`, `start_central_port_forward`,
+  `resolve_central_api_auth`, `start_central_port_forward`,
   `write_central_curl_config`, `cleanup_central_api_session`) for anything that
   talks to Central over HTTPS.
 - **On failure, leave a breadcrumb.** Best-effort collectors write a
@@ -81,13 +83,20 @@ follow a few hard conventions:
 Unit tests live in `tests/`:
 
 ```sh
-make test        # analyzer: python3 -m unittest discover -s tests -p 'test_*.py' -v
-make test-shell  # collectors: bats tests/common.bats
+make test             # analyzer: python3 -m unittest discover -s tests -p 'test_*.py' -v
+make test-shell       # collectors: bats tests/common.bats
+make test-integration # end-to-end collector tests: bats tests/integration.bats
 ```
 
 New analyzer behavior should come with a test in `tests/test_analyze.py`. Changes
 to `collection-scripts/common.sh` should extend `tests/common.bats` (use the
 `tests/mocks/oc` stub and `create_mock_oc` from `tests/test_helper.bash`).
+Collector flows that hit Central's API should add or extend fixtures under
+`tests/fixtures/central-api/` and tests in `tests/integration.bats`.
+
+Never commit extracted must-gather directories — `make check-bundles` enforces
+this in CI. See [VERSIONING.md](VERSIONING.md) for release tagging against RHACS
+minor versions.
 
 ## Changelog
 

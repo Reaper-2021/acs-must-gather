@@ -24,8 +24,8 @@ fi
 
 log_msg "Found Central pod: ${CENTRAL_POD} in namespace ${CENTRAL_NS}"
 
-if ! fetch_central_admin_password; then
-    log_msg "WARNING: Could not retrieve Central admin password; auth-required endpoints will fail."
+if ! resolve_central_api_auth; then
+    log_msg "WARNING: Could not obtain Central API credentials; auth-required endpoints will fail."
 fi
 
 if ! start_central_port_forward; then

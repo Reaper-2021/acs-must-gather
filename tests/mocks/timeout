@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Pass-through mock for GNU timeout (not available on stock macOS).
+# Usage: timeout <duration> <command> [args...]
+if (($# < 2)); then
+    exit 125
+fi
+shift
+if [[ "$1" == "--" ]]; then
+    shift
+fi
+exec "$@"

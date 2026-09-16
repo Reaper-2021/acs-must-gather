@@ -116,6 +116,32 @@ load test_helper
     [[ "$output" == *"ns=stackrox"* ]]
 }
 
+@test "resolve_central_api_auth prefers ROX_API_TOKEN over admin password" {
+    create_mock_oc "central-abc" "s3cret"
+    run bash -c "
+        export ROX_API_TOKEN='bearer-token'
+        export CENTRAL_NS='stackrox'
+        source '${SCRIPT_DIR}/common.sh'
+        if resolve_central_api_auth; then
+            echo \"token=\${CENTRAL_API_TOKEN}\"
+            echo \"pw=\${CENTRAL_ADMIN_PASSWORD}\"
+        fi
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"token=bearer-token"* ]]
+    [[ "$output" != *"pw=s3cret"* ]]
+}
+
+@test "write_central_curl_config writes Bearer header for API token" {
+    run bash -c "
+        source '${SCRIPT_DIR}/common.sh'
+        CENTRAL_API_TOKEN='tok123'
+        write_central_curl_config
+        grep -q 'Bearer tok123' \"\${CENTRAL_CURL_CONFIG}\"
+    "
+    [ "$status" -eq 0 ]
+}
+
 @test "fetch_central_admin_password reads central-htpasswd" {
     create_mock_oc "central-abc" "s3cret"
     run bash -c "
