@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Default oc stub for BATS. Tests that need specific behaviour should call
+# create_mock_oc from test_helper.bash to shadow this with a per-test stub.
+[[ -n "${MOCK_OC_LOG_FILE:-}" ]] && printf '%s\n' "$*" >> "${MOCK_OC_LOG_FILE}"
+exit 0

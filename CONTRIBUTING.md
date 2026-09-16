@@ -22,8 +22,9 @@ request.
 2. Make your change.
 3. Run the checks locally — they must pass before you open a PR:
    ```sh
-   make lint    # shellcheck + analyzer py_compile
-   make test    # analyzer unit tests
+   make lint        # shellcheck + analyzer py_compile
+   make test        # analyzer unit tests
+   make test-shell  # BATS tests for common.sh (when collection scripts change)
    ```
    No output from `make lint` means it passed (both tools are silent on
    success). `$?` is `0` on success.
@@ -77,17 +78,16 @@ follow a few hard conventions:
 
 ## Tests
 
-Unit tests live in `tests/` and use the stdlib `unittest` runner:
+Unit tests live in `tests/`:
 
 ```sh
-make test
-# or: python3 -m unittest discover -s tests -p 'test_*.py' -v
+make test        # analyzer: python3 -m unittest discover -s tests -p 'test_*.py' -v
+make test-shell  # collectors: bats tests/common.bats
 ```
 
-New analyzer behavior should come with a test. The suite loads the extension-less
-`acs-analyze` script as a module and builds small fixture bundles in a
-`tempfile` directory — follow the existing patterns in
-`tests/test_analyze.py`.
+New analyzer behavior should come with a test in `tests/test_analyze.py`. Changes
+to `collection-scripts/common.sh` should extend `tests/common.bats` (use the
+`tests/mocks/oc` stub and `create_mock_oc` from `tests/test_helper.bash`).
 
 ## Changelog
 

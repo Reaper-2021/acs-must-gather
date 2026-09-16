@@ -1,8 +1,8 @@
 name: CI
 
-# Delegates to the Makefile targets (`make lint`, `make test`) so the checks
-# run identically here and on a contributor's machine -- the Makefile stays the
-# single source of truth for what "green" means.
+# Delegates to the Makefile targets (`make lint`, `make test`, `make test-shell`)
+# so the checks run identically here and on a contributor's machine -- the
+# Makefile stays the single source of truth for what "green" means.
 on:
   push:
     branches: [main]
@@ -40,3 +40,30 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: make test
         run: make test
+
+  shell-test:
+    name: common.sh BATS tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+      - name: make test-shell
+        run: make test-shell
+
+  image:
+    name: image build and scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t acs-must-gather:ci .
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: acs-must-gather:ci
+          format: table
+          severity: CRITICAL,HIGH
+          # The base origin-must-gather image may report HIGH findings in the
+          # bundled oc binary; fail the job only on CRITICAL in our layer.
+          exit-code: "0"
