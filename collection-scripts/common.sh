@@ -7,7 +7,7 @@ MUST_GATHER_DIR="${MUST_GATHER_DIR:-/must-gather}"
 INSPECT_TIMEOUT="${INSPECT_TIMEOUT:-120}"
 DIAG_TIMEOUT="${DIAG_TIMEOUT:-30}"
 # OpenShift must-gather contract: line 2 of /must-gather/version is major.minor.micro.
-ACS_MUST_GATHER_VERSION="${ACS_MUST_GATHER_VERSION:-1.6.1}"
+ACS_MUST_GATHER_VERSION="${ACS_MUST_GATHER_VERSION:-1.7.0}"
 
 log_msg() {
     local msg
@@ -16,12 +16,70 @@ log_msg() {
     echo "${msg}" >> "${MUST_GATHER_DIR}/gather.log"
 }
 
-get_log_collection_args() {
+# init_log_collection
+# Parse MUST_GATHER_SINCE* and REDUCE_LOGS into exported globals used by
+# inspect_resource and gather. Returns 1 on an invalid REDUCE_LOGS token.
+# Safe to call more than once; re-parses from the current environment.
+init_log_collection() {
+    LOG_COLLECTION_ARGS=""
     if [[ -n "${MUST_GATHER_SINCE_TIME:-}" ]]; then
-        echo "--since-time=${MUST_GATHER_SINCE_TIME}"
+        LOG_COLLECTION_ARGS="--since-time=${MUST_GATHER_SINCE_TIME}"
     elif [[ -n "${MUST_GATHER_SINCE:-}" ]]; then
-        echo "--since=${MUST_GATHER_SINCE}"
+        LOG_COLLECTION_ARGS="--since=${MUST_GATHER_SINCE}"
     fi
+
+    # Defaults match oc adm inspect: include rotated pod logs unless opted out.
+    ROTATED_POD_LOGS_ARG="--rotated-pod-logs"
+    COMPRESS_AFTER_GATHER=""
+
+    if [[ -n "${REDUCE_LOGS:-}" ]]; then
+        local opt
+        # Intentional word-splitting of comma/space separated options.
+        # shellcheck disable=SC2086
+        for opt in ${REDUCE_LOGS//,/ }; do
+            opt="${opt#"${opt%%[![:space:]]*}"}"
+            opt="${opt%"${opt##*[![:space:]]}"}"
+            case "${opt}" in
+                skip_rotated_logs)
+                    ROTATED_POD_LOGS_ARG=""
+                    ;;
+                compress_logs)
+                    COMPRESS_AFTER_GATHER=true
+                    ;;
+                "")
+                    ;;
+                *)
+                    echo "ERROR: REDUCE_LOGS unknown value '${opt}'. Allowed: skip_rotated_logs, compress_logs (got: [${REDUCE_LOGS}])." >&2
+                    return 1
+                    ;;
+            esac
+        done
+    fi
+
+    export LOG_COLLECTION_ARGS ROTATED_POD_LOGS_ARG COMPRESS_AFTER_GATHER
+}
+
+get_log_collection_args() {
+    if [[ -z "${LOG_COLLECTION_ARGS+x}" ]]; then
+        init_log_collection || return 1
+    fi
+    echo "${LOG_COLLECTION_ARGS}"
+}
+
+# compress_logs [target_dir]
+# Gzip collected .log files larger than 10MB (skip already-gzipped). Honors
+# REDUCE_LOGS=compress_logs, which gather runs after all sub-collectors finish.
+compress_logs() {
+    local target_dir="${1:-${MUST_GATHER_DIR}}"
+
+    log_msg "Compressing collected logs in ${target_dir} (jobs=2)..."
+    find "${target_dir}" \
+        \( -name '*.log' -o -name '*.log.*' \) \
+        ! -name '*.gz' \
+        -size +10M \
+        -print0 2>/dev/null |
+        xargs -0 -r -P 2 gzip -1 2>/dev/null || true
+    log_msg "Log compression complete."
 }
 
 # inspect_resource <resource> [namespace] [extra oc adm inspect flags...]
@@ -41,8 +99,9 @@ inspect_resource() {
         ns_flags=(-n "${namespace}")
     fi
 
-    local log_args
-    log_args="$(get_log_collection_args)"
+    if [[ -z "${LOG_COLLECTION_ARGS+x}" ]]; then
+        init_log_collection || true
+    fi
 
     local extra_note=""
     if [[ " $* " == *" --all-namespaces "* ]]; then
@@ -52,7 +111,7 @@ inspect_resource() {
     # shellcheck disable=SC2086
     timeout "${INSPECT_TIMEOUT}" \
         oc adm inspect "${ns_flags[@]}" --dest-dir="${MUST_GATHER_DIR}" \
-        ${log_args} "$@" "${resource}" 2>&1 || true
+        ${LOG_COLLECTION_ARGS} ${ROTATED_POD_LOGS_ARG} "$@" "${resource}" 2>&1 || true
 }
 
 inspect_namespace() {

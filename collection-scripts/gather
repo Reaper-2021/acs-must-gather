@@ -10,6 +10,11 @@ mkdir -p "${MUST_GATHER_DIR}"
 # shellcheck source=collection-scripts/common.sh
 source /usr/bin/common.sh
 
+if ! init_log_collection; then
+    log_msg "ERROR: invalid REDUCE_LOGS value"
+    exit 1
+fi
+
 # ---------- Version metadata (OpenShift must-gather contract: product + semver) ----------
 {
     echo "acs-must-gather"
@@ -104,6 +109,10 @@ fi
 
 # ---------- Finalize ----------
 echo "end: $(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "${MUST_GATHER_DIR}/timestamp"
+
+if [[ "${COMPRESS_AFTER_GATHER:-}" == "true" ]]; then
+    compress_logs "${MUST_GATHER_DIR}"
+fi
 
 log_msg "=== ACS Must-Gather collection complete ==="
 
