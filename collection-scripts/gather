@@ -10,11 +10,10 @@ mkdir -p "${MUST_GATHER_DIR}"
 # shellcheck source=collection-scripts/common.sh
 source /usr/bin/common.sh
 
-# ---------- Version metadata ----------
+# ---------- Version metadata (OpenShift must-gather contract: product + semver) ----------
 {
     echo "acs-must-gather"
-    echo "collected-at: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    oc version 2>/dev/null || echo "oc version: unavailable"
+    echo "${ACS_MUST_GATHER_VERSION}"
 } > "${MUST_GATHER_DIR}/version"
 
 echo "start: $(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "${MUST_GATHER_DIR}/timestamp"

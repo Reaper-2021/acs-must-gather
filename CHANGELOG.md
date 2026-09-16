@@ -13,15 +13,28 @@ clusters. It collects three complementary layers of data: **acs-must-gather**
 `roxctl central debug download-diagnostics` bundle), and **acs-debug-dump**
 (Central's `roxctl central debug dump`, including a 30-second CPU profile).
 
-## [Unreleased]
+## [1.6.1] - 2026-09-16
 
 ### Bug Fixes
 
 - Cluster-scoped collection now inspects ACS custom resource instances
   (`Central`, `SecuredCluster`, `SecurityPolicy`) across all namespaces.
-  `inspect_resource` previously dropped `--all-namespaces`, so `oc adm inspect`
-  searched only the must-gather pod's namespace and the CR YAML never appeared
-  in the bundle.
+  `inspect_resource` forwards extra `oc adm inspect` flags such as
+  `--all-namespaces` instead of dropping them.
+- `gather_diagnostics` now uses the same auto-assigned Central port-forward as
+  the other Central API collectors (removed `lsof` / fixed-port logic).
+- Advanced Scanner V4 collection describes `scanner-v4-db` StatefulSets as well
+  as Deployments.
+- `/must-gather/version` follows the OpenShift must-gather contract: product
+  name on line 1, semver on line 2.
+
+### Technical Changes
+
+- Central pod discovery, admin password lookup, port-forward setup, and curl
+  auth are centralized in `common.sh` and reused by all Central API collectors.
+- README time-bounded collection examples now use `oc adm must-gather --since`
+  / `--since-time` (the supported client flags) instead of passing env vars as
+  gather arguments.
 
 ## [1.6.0] - 2026-08-21
 

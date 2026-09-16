@@ -91,13 +91,20 @@ while IFS= read -r ns; do
         } > "${ns_dir}/${comp}-vuln-summary.txt" 2>/dev/null || true
     done
 
-    # ---------- deployment describe (events, images, replicas) ----------
-    for dep in scanner-v4-indexer scanner-v4-matcher scanner-v4-db; do
+    # ---------- workload describe (events, images, replicas) ----------
+    for dep in scanner-v4-indexer scanner-v4-matcher; do
         if resource_exists "deployment/${dep}" "${ns}"; then
             oc describe "deployment/${dep}" -n "${ns}" \
                 > "${ns_dir}/${dep}-deployment.txt" 2>/dev/null || true
         fi
     done
+    if resource_exists "statefulset/scanner-v4-db" "${ns}"; then
+        oc describe "statefulset/scanner-v4-db" -n "${ns}" \
+            > "${ns_dir}/scanner-v4-db-deployment.txt" 2>/dev/null || true
+    elif resource_exists "deployment/scanner-v4-db" "${ns}"; then
+        oc describe "deployment/scanner-v4-db" -n "${ns}" \
+            > "${ns_dir}/scanner-v4-db-deployment.txt" 2>/dev/null || true
+    fi
 
     # ---------- memory tuning (requests/limits + GOMEMLIMIT) ----------
     # The matcher OOMs during Red Hat VEX feed updates when its Go soft-memory

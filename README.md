@@ -18,12 +18,16 @@ The image collects three complementary layers of data:
 
 ### Time-bounded collection
 
+`oc adm must-gather` injects `MUST_GATHER_SINCE` / `MUST_GATHER_SINCE_TIME` into the
+pod when you pass client flags (OpenShift 4.16+). The gather scripts read those
+environment variables automatically — do not pass them as gather arguments.
+
 ```sh
 # Collect logs from the last 8 hours
-oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest -- /usr/bin/gather MUST_GATHER_SINCE=8h
+oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest --since=8h
 
-# Collect logs since a specific time
-oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest -- /usr/bin/gather MUST_GATHER_SINCE_TIME=2024-01-15T10:00:00Z
+# Collect logs since a specific time (RFC3339)
+oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest --since-time=2024-01-15T10:00:00Z
 ```
 
 ## What is collected
@@ -168,8 +172,8 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
 
 | Variable | Description | Default |
 |---|---|---|
-| `MUST_GATHER_SINCE` | Duration filter for logs (e.g., `8h`, `30m`) | (all logs) |
-| `MUST_GATHER_SINCE_TIME` | ISO 8601 timestamp for log start | (all logs) |
+| `MUST_GATHER_SINCE` | Duration filter for logs (e.g., `8h`, `30m`). Set by `oc adm must-gather --since=…` (OpenShift 4.16+). | (all logs) |
+| `MUST_GATHER_SINCE_TIME` | ISO 8601 timestamp for log start. Set by `oc adm must-gather --since-time=…`. | (all logs) |
 | `MUST_GATHER_DIR` | Output base directory | `/must-gather` |
 | `GATHER_DIAGNOSTICS` | Enable Central diagnostic endpoint collection | `true` |
 | `GATHER_DIAGNOSTIC_BUNDLE` | Enable RHACS diagnostic bundle collection | `true` |

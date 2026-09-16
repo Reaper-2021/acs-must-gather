@@ -6,6 +6,8 @@
 MUST_GATHER_DIR="${MUST_GATHER_DIR:-/must-gather}"
 INSPECT_TIMEOUT="${INSPECT_TIMEOUT:-120}"
 DIAG_TIMEOUT="${DIAG_TIMEOUT:-30}"
+# OpenShift must-gather contract: line 2 of /must-gather/version is major.minor.micro.
+ACS_MUST_GATHER_VERSION="${ACS_MUST_GATHER_VERSION:-1.6.1}"
 
 log_msg() {
     local msg
@@ -180,4 +182,99 @@ collect_via_pf() {
     kill "${pf_pid}" 2>/dev/null || true
     wait "${pf_pid}" 2>/dev/null || true
     rm -f "${pf_log}"
+}
+
+# ---------- Central API access (port-forward + admin basic-auth) ----------
+# Collectors that query Central's HTTPS API share this flow. Globals are set
+# for the lifetime of a session; call cleanup_central_api_session on EXIT.
+
+# discover_central_pod
+# Requires ACS_NAMESPACES. Sets CENTRAL_POD and CENTRAL_NS on success.
+discover_central_pod() {
+    CENTRAL_POD=""
+    CENTRAL_NS=""
+    while IFS= read -r ns; do
+        [[ -z "${ns}" ]] && continue
+        local pod
+        pod=$(oc get pods -n "${ns}" -l app=central \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+        if [[ -n "${pod}" ]]; then
+            CENTRAL_POD="${pod}"
+            CENTRAL_NS="${ns}"
+            return 0
+        fi
+    done <<< "${ACS_NAMESPACES}"
+    return 1
+}
+
+# fetch_central_admin_password
+# Requires CENTRAL_NS. Sets CENTRAL_ADMIN_PASSWORD; returns 0 when non-empty.
+fetch_central_admin_password() {
+    CENTRAL_ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" central-htpasswd \
+        -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    if [[ -z "${CENTRAL_ADMIN_PASSWORD}" ]]; then
+        CENTRAL_ADMIN_PASSWORD=$(oc get secret -n "${CENTRAL_NS}" stackrox-admin-password \
+            -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    fi
+    [[ -n "${CENTRAL_ADMIN_PASSWORD}" ]]
+}
+
+# start_central_port_forward
+# Requires CENTRAL_POD and CENTRAL_NS. Sets CENTRAL_LOCAL_PORT, CENTRAL_PF_PID,
+# and CENTRAL_PF_LOG. Lets oc pick a free local port so parallel gatherers do
+# not collide.
+start_central_port_forward() {
+    CENTRAL_PF_LOG="$(mktemp)"
+    oc port-forward -n "${CENTRAL_NS}" "${CENTRAL_POD}" ":8443" > "${CENTRAL_PF_LOG}" 2>&1 &
+    CENTRAL_PF_PID=$!
+    CENTRAL_LOCAL_PORT=""
+    local _
+    for _ in $(seq 1 20); do
+        CENTRAL_LOCAL_PORT=$(grep -oE 'Forwarding from 127\.0\.0\.1:[0-9]+' "${CENTRAL_PF_LOG}" 2>/dev/null \
+            | grep -oE '[0-9]+$' | head -1)
+        [[ -n "${CENTRAL_LOCAL_PORT}" ]] && break
+        kill -0 "${CENTRAL_PF_PID}" 2>/dev/null || break
+        sleep 0.5
+    done
+    [[ -n "${CENTRAL_LOCAL_PORT}" ]] && kill -0 "${CENTRAL_PF_PID}" 2>/dev/null
+}
+
+stop_central_port_forward() {
+    if [[ -n "${CENTRAL_PF_PID:-}" ]]; then
+        kill "${CENTRAL_PF_PID}" 2>/dev/null || true
+        wait "${CENTRAL_PF_PID}" 2>/dev/null || true
+    fi
+    CENTRAL_PF_PID=""
+    rm -f "${CENTRAL_PF_LOG:-}"
+    CENTRAL_PF_LOG=""
+    CENTRAL_LOCAL_PORT=""
+}
+
+# write_central_curl_config
+# Keeps the admin password off the curl command line (visible via ps / /proc).
+write_central_curl_config() {
+    cleanup_central_curl_config
+    [[ -z "${CENTRAL_ADMIN_PASSWORD:-}" ]] && return 0
+    CENTRAL_CURL_CONFIG="$(mktemp)"
+    chmod 600 "${CENTRAL_CURL_CONFIG}"
+    printf 'user = "admin:%s"\n' "${CENTRAL_ADMIN_PASSWORD}" > "${CENTRAL_CURL_CONFIG}"
+}
+
+cleanup_central_curl_config() {
+    rm -f "${CENTRAL_CURL_CONFIG:-}"
+    CENTRAL_CURL_CONFIG=""
+}
+
+cleanup_central_api_session() {
+    stop_central_port_forward
+    cleanup_central_curl_config
+}
+
+# central_curl_auth_args
+# Echo curl --config args when admin auth is configured (for "$(central_curl_auth_args)").
+central_curl_auth_args() {
+    if [[ -n "${CENTRAL_CURL_CONFIG:-}" ]]; then
+        echo --config "${CENTRAL_CURL_CONFIG}"
+    fi
 }
