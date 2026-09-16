@@ -1,0 +1,14 @@
+title = "acs-must-gather gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and mock credentials used only in unit tests"
+paths = [
+  '''tests/fixtures/''',
+  '''tests/mocks/''',
+  '''tests/test_helper.bash''',
+  '''tests/common.bats''',
+  '''tests/integration.bats''',
+]

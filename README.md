@@ -40,10 +40,14 @@ equivalent).
 
 This image additionally:
 
-- Reads the Central admin password from `central-htpasswd` / `stackrox-admin-password` to download the diagnostic bundle, debug dump, and advanced API snapshots over `oc port-forward`.
-- Lists and inspects RHACS CRDs, webhooks, ClusterRoles, SCCs, and workloads across namespaces.
+- Authenticates to Central's API over `oc port-forward` using `ROX_API_TOKEN`
+  (preferred) or the admin password from `central-htpasswd` /
+  `stackrox-admin-password`.
+- Lists and inspects RHACS CRDs, webhooks, ClusterRoles, SCCs, and workloads
+  across namespaces.
 
-Treat every must-gather bundle as confidential. See [SECURITY.md](SECURITY.md) for data-handling guidance.
+Treat every must-gather bundle as confidential. See [SECURITY.md](SECURITY.md)
+for data classification and handling guidance.
 
 ## What is collected
 
@@ -157,11 +161,13 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
   endpoints). Surfaces stuck vulnerability updates and never-ready or
   crash-looping Scanner V4 components that the Central-focused bundle misses.
   Reached over `oc port-forward`.
-- **`vuln-report/`** — an image-scan / CVE and policy-violation snapshot pulled
-  from Central's REST API (admin basic-auth over `oc port-forward`, the same
-  mechanism as the debug dump). The officially-supported bundle describes
-  Central's *health*; it does not carry the per-image CVE findings or the
-  violation list a support case usually turns on. Includes
+- **`vuln-report/`** *(opt-in, default off)* — an image-scan / CVE and
+  policy-violation snapshot pulled from Central's REST API (`ROX_API_TOKEN` or
+  admin basic-auth over `oc port-forward`). **High sensitivity:** contains
+  per-image CVE findings and policy violations across the fleet. Enable with
+  `GATHER_ADV_VULN_REPORT=true` only when needed. The officially-supported
+  bundle describes Central's *health*; it does not carry the per-image CVE
+  findings or the violation list a support case usually turns on. Includes
   `vuln-mgmt-workloads.json` (streaming `/v1/export/vuln-mgmt/workloads` — every
   deployment joined to its images with full CVE data, the machine-readable
   dataset the analyzer filters), `image-cves.csv` (human-readable image CVEs,
@@ -190,6 +196,7 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
 | `MUST_GATHER_SINCE` | Duration filter for logs (e.g., `8h`, `30m`). Set by `oc adm must-gather --since=…` (OpenShift 4.16+). | (all logs) |
 | `MUST_GATHER_SINCE_TIME` | ISO 8601 timestamp for log start. Set by `oc adm must-gather --since-time=…`. | (all logs) |
 | `MUST_GATHER_DIR` | Output base directory | `/must-gather` |
+| `ROX_API_TOKEN` | Central API bearer token (preferred over reading the admin password secret). Same token `roxctl` uses. | (unset — falls back to admin password secret) |
 | `REDUCE_LOGS` | Comma-separated bundle-size options: `skip_rotated_logs` (omit `--rotated-pod-logs` from `oc adm inspect`), `compress_logs` (gzip `.log` files ≥10MB after collection) | (unset) |
 | `GATHER_DIAGNOSTICS` | Enable Central diagnostic endpoint collection | `true` |
 | `GATHER_DIAGNOSTIC_BUNDLE` | Enable RHACS diagnostic bundle collection | `true` |
@@ -208,7 +215,7 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
 | `GATHER_ADV_TLS_CERTS` | Enable the TLS certificate expiry report | `true` |
 | `GATHER_ADV_FORENSICS` | Enable crash & upgrade forensics collection | `true` |
 | `GATHER_ADV_SCANNER_V4` | Enable Central-independent Scanner V4 health collection | `true` |
-| `GATHER_ADV_VULN_REPORT` | Enable the image-CVE / violation snapshot from Central's API | `true` |
+| `GATHER_ADV_VULN_REPORT` | Enable the image-CVE / violation snapshot from Central's API (high sensitivity — see [SECURITY.md](SECURITY.md)) | `false` |
 | `GATHER_ADV_PLATFORM` | Enable platform scoping, storage & startup forensics (db-init log, PVC describe, registry CA, sorted events) | `true` |
 | `ADV_SC_TIMEOUT` | Timeout per secured-cluster endpoint call (seconds) | `DIAG_TIMEOUT` (`30`) |
 | `ADV_FORENSICS_TIMEOUT` | Timeout per forensics call (seconds) | `DIAG_TIMEOUT` (`30`) |
@@ -584,6 +591,20 @@ real failures this bundle exposes are, in order: **expired certificates**
 (Step 6), **OOMKilled components** (Steps 1 + 7b), and **Sensor↔Central
 connectivity breaks** (Step 5).
 
+## Distribution
+
+`acs-must-gather` is **community / support tooling**. It is **not** published
+to `registry.redhat.io` and is **not** a Red Hat supported product component.
+
+| Channel | Location |
+|---|---|
+| Container image | `quay.io/rhn_support_shaising/acs-must-gather` (community Quay) |
+| Official RHACS diagnostics | `roxctl central debug download-diagnostics`, `roxctl central debug dump` |
+
+Tag images with both a semver (`1.8.0`) and an RHACS minor tag (`rhacs-4.6`)
+after you validate against that RHACS release. See [VERSIONING.md](VERSIONING.md)
+for the compatibility matrix and tagging convention.
+
 ## Building
 
 ```sh
@@ -603,12 +624,15 @@ analyzer syntax check).
 ## Testing
 
 ```sh
-make test        # analyzer unit tests (stdlib unittest)
-make test-shell  # BATS tests for collection-scripts/common.sh
+make test             # analyzer unit tests (stdlib unittest)
+make test-shell       # BATS tests for collection-scripts/common.sh
+make test-integration # collector integration tests (recorded Central API fixtures)
+make check-bundles    # fail if must-gather output paths are tracked in git
 ```
 
 Requires [bats](https://github.com/bats-core/bats-core) for `make test-shell`
-(`brew install bats-core` on macOS, `apt install bats` on Ubuntu).
+and `make test-integration` (`brew install bats-core` on macOS, `apt install
+bats` on Ubuntu).
 
 ## License
 

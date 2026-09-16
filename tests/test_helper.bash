@@ -32,7 +32,8 @@ if [[ "\$1" == "get" && "\$2" == "secret" && "\$*" == *"central-htpasswd"* ]]; t
 fi
 if [[ "\$1" == "port-forward" ]]; then
     echo "Forwarding from 127.0.0.1:18443 -> 8443"
-    sleep 60 &
+    # Stay alive so start_central_port_forward can detect the local port.
+    exec tail -f /dev/null
     exit 0
 fi
 if [[ "\$1" == "adm" && "\$2" == "inspect" ]]; then

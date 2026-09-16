@@ -39,10 +39,9 @@ fi
 
 log_msg "Found Central pod: ${CENTRAL_POD} in namespace ${CENTRAL_NS}"
 
-if ! fetch_central_admin_password; then
-    log_msg "WARNING: Could not retrieve Central admin password; cannot download debug dump."
-    echo "Could not retrieve Central admin password (checked central-htpasswd and stackrox-admin-password)." \
-        > "${DUMP_DIR}/collection-error.txt"
+if ! resolve_central_api_auth; then
+    log_msg "WARNING: Could not obtain Central API credentials; cannot download debug dump."
+    central_api_credentials_error > "${DUMP_DIR}/collection-error.txt"
     exit 0
 fi
 

@@ -15,6 +15,8 @@
 - [ ] `make lint`
 - [ ] `make test`
 - [ ] `make test-shell` (if collection-scripts changed)
+- [ ] `make test-integration` (if collectors or API fixtures changed)
+- [ ] `make check-bundles` (no extracted must-gather directories committed)
 - [ ] Manual `oc adm must-gather` run (if behaviour changed)
 
 ## Checklist

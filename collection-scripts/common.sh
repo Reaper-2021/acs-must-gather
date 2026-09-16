@@ -7,7 +7,7 @@ MUST_GATHER_DIR="${MUST_GATHER_DIR:-/must-gather}"
 INSPECT_TIMEOUT="${INSPECT_TIMEOUT:-120}"
 DIAG_TIMEOUT="${DIAG_TIMEOUT:-30}"
 # OpenShift must-gather contract: line 2 of /must-gather/version is major.minor.micro.
-ACS_MUST_GATHER_VERSION="${ACS_MUST_GATHER_VERSION:-1.7.0}"
+ACS_MUST_GATHER_VERSION="${ACS_MUST_GATHER_VERSION:-1.8.0}"
 
 log_msg() {
     local msg
@@ -243,9 +243,11 @@ collect_via_pf() {
     rm -f "${pf_log}"
 }
 
-# ---------- Central API access (port-forward + admin basic-auth) ----------
+# ---------- Central API access (port-forward + token or admin basic-auth) ----------
 # Collectors that query Central's HTTPS API share this flow. Globals are set
 # for the lifetime of a session; call cleanup_central_api_session on EXIT.
+# Prefer ROX_API_TOKEN (Bearer) when set; otherwise read the admin password
+# from central-htpasswd / stackrox-admin-password.
 
 # discover_central_pod
 # Requires ACS_NAMESPACES. Sets CENTRAL_POD and CENTRAL_NS on success.
@@ -277,6 +279,25 @@ fetch_central_admin_password() {
             -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || true
     fi
     [[ -n "${CENTRAL_ADMIN_PASSWORD}" ]]
+}
+
+# resolve_central_api_auth
+# Sets CENTRAL_API_TOKEN from ROX_API_TOKEN or CENTRAL_ADMIN_PASSWORD from the
+# cluster secret. Returns 0 when either credential is available.
+resolve_central_api_auth() {
+    CENTRAL_API_TOKEN=""
+    CENTRAL_ADMIN_PASSWORD=""
+    if [[ -n "${ROX_API_TOKEN:-}" ]]; then
+        CENTRAL_API_TOKEN="${ROX_API_TOKEN}"
+        return 0
+    fi
+    fetch_central_admin_password
+}
+
+# central_api_credentials_error
+# Human-readable message when resolve_central_api_auth fails.
+central_api_credentials_error() {
+    echo "Could not obtain Central API credentials (set ROX_API_TOKEN or ensure central-htpasswd / stackrox-admin-password exists)."
 }
 
 # start_central_port_forward
@@ -311,13 +332,19 @@ stop_central_port_forward() {
 }
 
 # write_central_curl_config
-# Keeps the admin password off the curl command line (visible via ps / /proc).
+# Keeps credentials off the curl command line (visible via ps / /proc).
 write_central_curl_config() {
     cleanup_central_curl_config
-    [[ -z "${CENTRAL_ADMIN_PASSWORD:-}" ]] && return 0
+    if [[ -z "${CENTRAL_API_TOKEN:-}" && -z "${CENTRAL_ADMIN_PASSWORD:-}" ]]; then
+        return 1
+    fi
     CENTRAL_CURL_CONFIG="$(mktemp)"
     chmod 600 "${CENTRAL_CURL_CONFIG}"
-    printf 'user = "admin:%s"\n' "${CENTRAL_ADMIN_PASSWORD}" > "${CENTRAL_CURL_CONFIG}"
+    if [[ -n "${CENTRAL_API_TOKEN:-}" ]]; then
+        printf 'header = "Authorization: Bearer %s"\n' "${CENTRAL_API_TOKEN}" > "${CENTRAL_CURL_CONFIG}"
+    else
+        printf 'user = "admin:%s"\n' "${CENTRAL_ADMIN_PASSWORD}" > "${CENTRAL_CURL_CONFIG}"
+    fi
 }
 
 cleanup_central_curl_config() {

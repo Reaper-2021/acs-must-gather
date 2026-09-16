@@ -85,8 +85,8 @@ oc get clusterrolebindings -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{
 if ! discover_central_pod; then
     echo "No running Central pod; administration events not collected." \
         > "${OUT_DIR}/administration-events.json.error"
-elif ! fetch_central_admin_password; then
-    echo "Central admin password unavailable; skipped administration events." \
+elif ! resolve_central_api_auth; then
+    echo "Central API credentials unavailable; skipped administration events." \
         > "${OUT_DIR}/administration-events.json.error"
 elif ! start_central_port_forward; then
     echo "port-forward to Central failed" > "${OUT_DIR}/administration-events.json.error"
