@@ -13,6 +13,17 @@ clusters. It collects three complementary layers of data: **acs-must-gather**
 `roxctl central debug download-diagnostics` bundle), and **acs-debug-dump**
 (Central's `roxctl central debug dump`, including a 30-second CPU profile).
 
+## [1.8.2] - 2026-09-18
+
+### Fixed
+
+- Collector toggles can now be set through `oc adm must-gather`. The entrypoint
+  is now exec-form and `gather` accepts trailing `KEY=VALUE` arguments and
+  exports them, so options like the opt-in vuln-report can be enabled with
+  `-- /usr/bin/gather GATHER_ADV_VULN_REPORT=true`. Previously the shell-form
+  entrypoint silently dropped any appended command/arguments, leaving no
+  supported way to flip a toggle at collection time.
+
 ## [1.8.1] - 2026-09-18
 
 ### Security

@@ -30,6 +30,26 @@ oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest -
 oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest --since-time=2024-01-15T10:00:00Z
 ```
 
+### Setting collector options
+
+Collector toggles and tuning knobs (see [Environment Variables](#environment-variables))
+are read from the environment. `oc adm must-gather` has no flag for passing
+environment variables into the collection pod, so append them as `KEY=VALUE`
+arguments after `--`; the entrypoint exports each pair before collection begins.
+
+```sh
+# Enable the opt-in image-CVE / violation snapshot (high sensitivity — see SECURITY.md)
+oc adm must-gather --image=quay.io/rhn_support_shaising/acs-must-gather:latest \
+  -- /usr/bin/gather GATHER_ADV_VULN_REPORT=true
+```
+
+The leading `/usr/bin/gather` is required: `oc adm must-gather -- <args>` replaces
+the container command with `<args>`, so the first token must be the gather
+executable. Arguments that are not `KEY=VALUE` pairs are ignored.
+
+Time filters are the exception — pass `--since` / `--since-time` as `oc` client
+flags (see above), not as gather arguments.
+
 ### Permissions
 
 `oc adm must-gather` creates a short-lived pod in a temporary namespace and
@@ -164,8 +184,9 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
 - **`vuln-report/`** *(opt-in, default off)* — an image-scan / CVE and
   policy-violation snapshot pulled from Central's REST API (`ROX_API_TOKEN` or
   admin basic-auth over `oc port-forward`). **High sensitivity:** contains
-  per-image CVE findings and policy violations across the fleet. Enable with
-  `GATHER_ADV_VULN_REPORT=true` only when needed. The officially-supported
+  per-image CVE findings and policy violations across the fleet. Enable by
+  appending `GATHER_ADV_VULN_REPORT=true` after `-- /usr/bin/gather` (see
+  [Setting collector options](#setting-collector-options)) only when needed. The officially-supported
   bundle describes Central's *health*; it does not carry the per-image CVE
   findings or the violation list a support case usually turns on. Includes
   `vuln-mgmt-workloads.json` (streaming `/v1/export/vuln-mgmt/workloads` — every

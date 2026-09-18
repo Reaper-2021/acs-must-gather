@@ -84,5 +84,24 @@ setup_gather_path() {
     "
     [ "$status" -eq 0 ]
     [[ "$output" == *"acs-must-gather"* ]]
-    [[ "$output" == *"1.8.1"* ]]
+    [[ "$output" == *"1.8.2"* ]]
+}
+
+@test "gather applies KEY=VALUE runtime overrides from arguments" {
+    create_mock_oc
+    setup_gather_path
+    run bash -c "
+        export PATH='${TEST_TMPDIR}/usr/bin:${TEST_TMPDIR}/mocks:${MOCKS_DIR}:${PATH}'
+        export MUST_GATHER_DIR='${MUST_GATHER_DIR}'
+        export GATHER_DIAGNOSTICS='false'
+        export GATHER_DIAGNOSTIC_BUNDLE='false'
+        export GATHER_DEBUG_DUMP='false'
+        export GATHER_ADVANCED='false'
+        export ACS_NAMESPACES=''
+        gather GATHER_ADV_VULN_REPORT=true not-a-var another=ok
+        cat \"\${MUST_GATHER_DIR}/gather.log\"
+    "
+    [ "$status" -eq 0 ]
+    # Valid KEY=VALUE pairs are recorded; bare tokens are ignored.
+    [[ "$output" == *"Applied runtime overrides from arguments: GATHER_ADV_VULN_REPORT another"* ]]
 }

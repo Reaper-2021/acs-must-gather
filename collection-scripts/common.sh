@@ -7,7 +7,7 @@ MUST_GATHER_DIR="${MUST_GATHER_DIR:-/must-gather}"
 INSPECT_TIMEOUT="${INSPECT_TIMEOUT:-120}"
 DIAG_TIMEOUT="${DIAG_TIMEOUT:-30}"
 # OpenShift must-gather contract: line 2 of /must-gather/version is major.minor.micro.
-ACS_MUST_GATHER_VERSION="${ACS_MUST_GATHER_VERSION:-1.8.1}"
+ACS_MUST_GATHER_VERSION="${ACS_MUST_GATHER_VERSION:-1.8.2}"
 
 log_msg() {
     local msg
