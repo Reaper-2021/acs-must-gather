@@ -14,4 +14,8 @@ RUN dnf -y upgrade --refresh \
 
 COPY collection-scripts/* /usr/bin/
 
-ENTRYPOINT /usr/bin/gather
+# Exec form so `oc adm must-gather ... -- <command>` overrides the entrypoint
+# cleanly (e.g. `-- bash -c 'GATHER_ADV_VULN_REPORT=true /usr/bin/gather'`).
+# Shell form (`ENTRYPOINT /usr/bin/gather`) wraps this in `/bin/sh -c` and
+# silently drops any command/args the caller appends.
+ENTRYPOINT ["/usr/bin/gather"]

@@ -7,6 +7,20 @@
 export MUST_GATHER_DIR="${MUST_GATHER_DIR:-/must-gather}"
 mkdir -p "${MUST_GATHER_DIR}"
 
+# ---------- Runtime overrides via `oc adm must-gather -- KEY=VALUE ...` ----------
+# `oc adm must-gather -- ARGS` appends ARGS to this (exec-form) entrypoint rather
+# than replacing the command, so a `-- bash -c 'VAR=x /usr/bin/gather'` wrapper is
+# silently ignored. Accept trailing KEY=VALUE pairs and export them, so toggles
+# like `GATHER_ADV_VULN_REPORT=true` work with a plain `-- GATHER_ADV_VULN_REPORT=true`.
+GATHER_ARG_OVERRIDES=()
+for _arg in "$@"; do
+    if [[ "${_arg}" =~ ^[A-Za-z_][A-Za-z0-9_]*=.*$ ]]; then
+        export "${_arg?}"
+        GATHER_ARG_OVERRIDES+=("${_arg%%=*}")
+    fi
+done
+unset _arg
+
 # shellcheck source=collection-scripts/common.sh
 source /usr/bin/common.sh
 
@@ -24,6 +38,10 @@ fi
 echo "start: $(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "${MUST_GATHER_DIR}/timestamp"
 
 log_msg "=== ACS Must-Gather collection starting ==="
+
+if [[ ${#GATHER_ARG_OVERRIDES[@]} -gt 0 ]]; then
+    log_msg "Applied runtime overrides from arguments: ${GATHER_ARG_OVERRIDES[*]}"
+fi
 
 # ---------- Namespace discovery ----------
 OPERATOR_NS="$(discover_operator_namespace)"
