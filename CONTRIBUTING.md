@@ -84,13 +84,15 @@ Unit tests live in `tests/`:
 
 ```sh
 make test             # analyzer: python3 -m unittest discover -s tests -p 'test_*.py' -v
-make test-shell       # collectors: bats tests/common.bats
+make test-shell       # collectors: bats tests/common.bats tests/scrub.bats
 make test-integration # end-to-end collector tests: bats tests/integration.bats
 ```
 
 New analyzer behavior should come with a test in `tests/test_analyze.py`. Changes
 to `collection-scripts/common.sh` should extend `tests/common.bats` (use the
 `tests/mocks/oc` stub and `create_mock_oc` from `tests/test_helper.bash`).
+Env scrubbing for the vuln-report workloads export lives in
+`scrub_vuln_workloads_env` — cover changes with `tests/scrub.bats`.
 Collector flows that hit Central's API should add or extend fixtures under
 `tests/fixtures/central-api/` and tests in `tests/integration.bats`.
 

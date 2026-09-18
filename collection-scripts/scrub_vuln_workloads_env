@@ -1,0 +1,107 @@
+#!/bin/bash
+# scrub_vuln_workloads_env — redact container env values in vuln-mgmt export
+#
+# Usage: scrub_vuln_workloads_env <path-to-vuln-mgmt-workloads.json>
+#
+# Central's /v1/export/vuln-mgmt/workloads stream includes containers[].config.env
+# with cleartext `value` fields (including secrets such as REGISTRY_HTTP_SECRET).
+# This rewrites the file in place, replacing every non-empty env value with
+# "<redacted>" while keeping key names and envVarSource for support context.
+#
+# Accepts NDJSON (one object per line, the normal Central stream) or a single
+# JSON document / array. Requires jq. Returns non-zero on failure (caller should
+# fail closed: remove the raw file rather than ship cleartext env values).
+
+set -u
+
+if [[ $# -ne 1 || -z "${1:-}" ]]; then
+    echo "usage: scrub_vuln_workloads_env <file>" >&2
+    exit 2
+fi
+
+infile="$1"
+
+if [[ ! -f "${infile}" ]]; then
+    echo "scrub_vuln_workloads_env: not a file: ${infile}" >&2
+    exit 1
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+    echo "scrub_vuln_workloads_env: jq is required" >&2
+    exit 1
+fi
+
+# Empty export is fine (nothing to scrub).
+if [[ ! -s "${infile}" ]]; then
+    exit 0
+fi
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "${tmpdir}"' EXIT
+outfile="${tmpdir}/scrubbed.json"
+
+# shellcheck disable=SC2016
+# -n + inputs reads an NDJSON stream (one JSON value per line) or a single doc.
+if ! jq -nc '
+  def scrub_env:
+    if type == "object" and has("env") and (.env | type == "array") then
+      .env |= map(
+        if type == "object" and has("value")
+           and (.value | type == "string")
+           and .value != ""
+           and .value != "<redacted>"
+        then .value = "<redacted>"
+        else .
+        end
+      )
+    else .
+    end;
+  def scrub_container:
+    if type == "object" and has("config") and (.config | type == "object") then
+      .config |= scrub_env
+    else .
+    end;
+  def scrub_deployment:
+    if type == "object" and has("containers") and (.containers | type == "array") then
+      .containers |= map(scrub_container)
+    else .
+    end;
+  def scrub_result:
+    if type == "object" and has("deployment") then
+      .deployment |= scrub_deployment
+    else .
+    end;
+  def scrub_obj:
+    if type == "object" and has("result") then
+      .result |= scrub_result
+    elif type == "object" and has("deployment") then
+      scrub_result
+    else .
+    end;
+  inputs
+  | if type == "array" then map(scrub_obj) else scrub_obj end
+' "${infile}" > "${outfile}"; then
+    echo "scrub_vuln_workloads_env: jq scrub failed" >&2
+    exit 1
+fi
+
+if [[ ! -s "${outfile}" ]]; then
+    echo "scrub_vuln_workloads_env: scrub produced empty output" >&2
+    exit 1
+fi
+
+# Atomic replace: write via temp in the same directory when possible.
+dir="$(dirname -- "${infile}")"
+tmp_in_place="$(mktemp "${dir}/.vuln-scrub.XXXXXX")"
+if ! cp "${outfile}" "${tmp_in_place}"; then
+    echo "scrub_vuln_workloads_env: failed to stage scrubbed file" >&2
+    rm -f "${tmp_in_place}"
+    exit 1
+fi
+if ! mv "${tmp_in_place}" "${infile}"; then
+    echo "scrub_vuln_workloads_env: failed to replace ${infile}" >&2
+    rm -f "${tmp_in_place}"
+    exit 1
+fi
+
+exit 0

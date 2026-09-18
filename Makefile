@@ -19,7 +19,7 @@ test:
 	python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 test-shell:
-	bats tests/common.bats
+	bats tests/common.bats tests/scrub.bats
 
 test-integration:
 	bats tests/integration.bats
