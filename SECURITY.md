@@ -28,7 +28,7 @@ must-gather bundle as **confidential**:
 | `acs-diagnostic-bundle/` | Medium–High | Official RHACS bundle; scrubbed auth providers, but includes cluster topology and logs. |
 | `acs-debug-dump/` | High | Central profiling data and database diagnostics. |
 | `advanced-acs-diagnostics/tls-certs/` | Medium | **Public certificate material only** — private keys are never decoded. |
-| `advanced-acs-diagnostics/vuln-report/` | **High** | Per-image CVE findings and policy violations across the fleet. **Disabled by default** (`GATHER_ADV_VULN_REPORT=false`). Enable only when a support case requires fleet-wide CVE/violation data. |
+| `advanced-acs-diagnostics/vuln-report/` | **High** | Per-image CVE findings and policy violations across the fleet. **Disabled by default** (`GATHER_ADV_VULN_REPORT=false`). Enable only when a support case requires fleet-wide CVE/violation data. Container env **values** in `vuln-mgmt-workloads.json` are redacted to `<redacted>` (keys retained); the raw export is discarded if scrubbing fails. |
 | `gather.log` | Medium | May reference namespaces, pod names, and endpoint paths. |
 
 **Operational guidance:**

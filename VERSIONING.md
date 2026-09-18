@@ -12,6 +12,7 @@ defaults to the value of `ACS_MUST_GATHER_VERSION` in
 | Tier 1 correctness | 1.6.1 | Central API helpers, contract fixes |
 | Tier 2 enterprise hardening | 1.7.0 | BATS, REDUCE_LOGS, CI image scan |
 | Tier 3 StackRox bar | 1.8.0 | ROX_API_TOKEN, integration tests, gitleaks |
+| Vuln-report env scrub | 1.8.1 | Redact container env values in workloads export |
 
 ## RHACS minor-version tags
 

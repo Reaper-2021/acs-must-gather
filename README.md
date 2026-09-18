@@ -170,7 +170,8 @@ must-gather. Disable the whole layer with `GATHER_ADVANCED=false`.
   findings or the violation list a support case usually turns on. Includes
   `vuln-mgmt-workloads.json` (streaming `/v1/export/vuln-mgmt/workloads` — every
   deployment joined to its images with full CVE data, the machine-readable
-  dataset the analyzer filters), `image-cves.csv` (human-readable image CVEs,
+  dataset the analyzer filters; **container env values are scrubbed** to
+  `<redacted>` before the file is kept), `image-cves.csv` (human-readable image CVEs,
   opens in any spreadsheet), `violations.json` (policy violations, paged), and
   `alerts-summary-counts-*.json` (violation rollups by cluster / category).
   Violations default to `ACTIVE,ATTEMPTED` to keep the bundle bounded on

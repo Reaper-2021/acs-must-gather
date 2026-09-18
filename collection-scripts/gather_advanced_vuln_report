@@ -19,7 +19,10 @@
 #   vuln-mgmt-workloads.json        - GET /v1/export/vuln-mgmt/workloads
 #                                     (streaming: every deployment joined to its
 #                                     images and full CVE data; the primary
-#                                     machine-readable dataset for the analyzer)
+#                                     machine-readable dataset for the analyzer).
+#                                     Container env `value` fields are scrubbed
+#                                     to "<redacted>" before the file is kept
+#                                     (see scrub_vuln_workloads_env).
 #   image-cves.csv                  - GET /api/vm/export/csv?query=CVE Type:IMAGE_CVE
 #                                     (human-readable, opens in any spreadsheet)
 #   violations.json                 - GET /v1/alerts (paged; policy violations)
@@ -101,6 +104,19 @@ log_msg "Collecting image/CVE data from /v1/export/vuln-mgmt/workloads"
 fetch "/v1/export/vuln-mgmt/workloads" "${OUT_DIR}/vuln-mgmt-workloads.json" \
     "vuln-mgmt workloads export" || true
 
+# Fail closed on env scrub: Central resolves cleartext env values into this
+# export (including secrets). Prefer an .error breadcrumb over shipping them.
+if [[ -f "${OUT_DIR}/vuln-mgmt-workloads.json" ]]; then
+    if scrub_vuln_workloads_env "${OUT_DIR}/vuln-mgmt-workloads.json"; then
+        log_msg "  Scrubbed container env values in vuln-mgmt-workloads.json"
+    else
+        log_msg "  WARNING: env scrub failed; removing raw vuln-mgmt-workloads.json"
+        rm -f "${OUT_DIR}/vuln-mgmt-workloads.json"
+        echo "Env scrub failed; raw workloads export removed to avoid leaking container env values." \
+            > "${OUT_DIR}/vuln-mgmt-workloads.json.error"
+    fi
+fi
+
 # ---------- 2. Image CVEs as CSV (human-readable) ----------
 # The CVE CSV handler requires a "CVE Type" filter; IMAGE_CVE scopes it to
 # container-image CVEs. Space and colon are URL-encoded.
@@ -177,6 +193,9 @@ fetch "/v1/alerts/summary/counts?request.query=${ALERT_QUERY}&group_by=CATEGORY"
     echo "  image-cves.csv           <- GET /api/vm/export/csv?query=CVE Type:IMAGE_CVE"
     echo "  violations.json          <- GET /v1/alerts?query=Violation State:${ALERT_STATES} (paged)"
     echo "  alerts-summary-counts-*  <- GET /v1/alerts/summary/counts?group_by=CLUSTER|CATEGORY"
+    echo
+    echo "privacy:"
+    echo "  containers[].config.env[].value redacted to <redacted> (keys retained)"
     echo
     echo "sizes:"
     for f in vuln-mgmt-workloads.json image-cves.csv violations.json \

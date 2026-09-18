@@ -84,5 +84,5 @@ setup_gather_path() {
     "
     [ "$status" -eq 0 ]
     [[ "$output" == *"acs-must-gather"* ]]
-    [[ "$output" == *"1.8.0"* ]]
+    [[ "$output" == *"1.8.1"* ]]
 }

@@ -13,6 +13,15 @@ clusters. It collects three complementary layers of data: **acs-must-gather**
 `roxctl central debug download-diagnostics` bundle), and **acs-debug-dump**
 (Central's `roxctl central debug dump`, including a 30-second CPU profile).
 
+## [1.8.1] - 2026-09-18
+
+### Security
+
+- When `GATHER_ADV_VULN_REPORT=true`, container env **values** in
+  `vuln-mgmt-workloads.json` are redacted to `<redacted>` (keys and
+  `envVarSource` retained). If scrubbing fails, the raw export is removed
+  rather than shipped (`scrub_vuln_workloads_env`).
+
 ## [1.8.0] - 2026-09-16
 
 ### Added Features
